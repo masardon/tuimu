@@ -579,7 +579,7 @@ fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(" auto-follow  ", Style::default().fg(MUTED)),
         Span::styled("j/k", Style::default().fg(ACCENT)),
         Span::styled(" scroll  ", Style::default().fg(MUTED)),
-        Span::styled("Esc/l", Style::default().fg(ACCENT)),
+        Span::styled("Esc/#", Style::default().fg(ACCENT)),
         Span::styled(" close", Style::default().fg(MUTED)),
     ]);
 
