@@ -97,6 +97,36 @@ pub struct Track {
     pub duration: Option<f64>,
     pub url: String,
     pub source: Source,
+    pub quality: Quality,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Quality {
+    Low,     // < 128kbps, poor quality
+    Medium,  // 128-256kbps, standard quality
+    High,    // 256-320kbps, good quality
+    Lossless, // FLAC, etc., lossless quality
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QualityFilter {
+    All,
+    Lossless,
+    High,
+    Medium,
+    Low,
+}
+
+impl QualityFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Lossless => "Lossless",
+            Self::High => "High",
+            Self::Medium => "Medium",
+            Self::Low => "Low",
+        }
+    }
 }
 
 impl Track {
@@ -104,6 +134,68 @@ impl Track {
         self.duration
             .map(format_duration)
             .unwrap_or_else(|| "--:--".into())
+    }
+
+    pub fn quality_label(&self) -> &'static str {
+        match self.quality {
+            Quality::Low => "Low",
+            Quality::Medium => "Medium",
+            Quality::High => "High",
+            Quality::Lossless => "Lossless",
+        }
+    }
+
+    pub fn quality_score(&self) -> u8 {
+        match self.quality {
+            Quality::Low => 1,
+            Quality::Medium => 5,
+            Quality::High => 8,
+            Quality::Lossless => 10,
+        }
+    }
+
+    pub fn detect_quality(title: &str, source: Source) -> Quality {
+        let title_lower = title.to_lowercase();
+        
+        // Check for lossless indicators
+        if title_lower.contains("flac")
+            || title_lower.contains("wav")
+            || title_lower.contains("alac")
+            || title_lower.contains("24bit")
+            || title_lower.contains(" hires")
+            || title_lower.contains("highres")
+        {
+            return Quality::Lossless;
+        }
+
+        // Check for high-quality indicators
+        if title_lower.contains("320")
+            || title_lower.contains("hq")
+            || title_lower.contains("high quality")
+            || title_lower.contains("cd quality")
+            || title_lower.contains("studio")
+            || title_lower.contains("master")
+        {
+            return Quality::High;
+        }
+
+        // Check for medium-quality indicators
+        if title_lower.contains("128")
+            || title_lower.contains("192")
+            || title_lower.contains("256")
+            || title_lower.contains("mp3")
+        {
+            return Quality::Medium;
+        }
+
+        // Default quality based on source
+        match source {
+            Source::Bandcamp => Quality::High, // Bandcamp typically provides high quality
+            Source::YouTube => Quality::Medium, // YouTube varies, usually medium
+            Source::SoundCloud => Quality::Medium, // SoundCloud varies, usually medium
+            Source::Spotify => Quality::Medium, // Spotify is typically 160-320kbps
+            Source::Web => Quality::Low, // Unknown web sources are unpredictable
+        }
     }
 }
 

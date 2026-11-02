@@ -366,12 +366,15 @@ fn track_from_json(value: &Value, fallback: Option<SearchSource>) -> Option<Trac
         };
     }
 
+    let quality = Track::detect_quality(&title, source);
+    
     Some(Track {
         title,
         artist,
         duration,
         url,
         source,
+        quality,
     })
 }
 

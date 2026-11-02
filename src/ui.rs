@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{App, Focus};
-use crate::model::{RepeatMode, Source, Track, format_duration, truncate};
+use crate::model::{Quality, RepeatMode, Source, Track, format_duration, truncate};
 
 const ACCENT: Color = Color::Rgb(190, 150, 255);
 const ACCENT_DIM: Color = Color::Rgb(105, 85, 140);
@@ -126,9 +126,10 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
     let widths = [
         Constraint::Length(2),
         Constraint::Length(4),
-        Constraint::Min(12),
-        Constraint::Length(22),
+        Constraint::Min(10),
+        Constraint::Length(20),
         Constraint::Length(7),
+        Constraint::Length(10),
     ];
     let current_url = app.current_track().map(|track| track.url.as_str());
     let rows = app.results.iter().enumerate().map(|(index, track)| {
@@ -137,7 +138,7 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
     });
     let table = Table::new(rows, widths)
         .header(
-            Row::new(["", "SRC", "TITLE", "ARTIST", "TIME"])
+            Row::new(["", "SRC", "TITLE", "ARTIST", "TIME", "QUALITY"])
                 .style(Style::default().fg(MUTED).bold()),
         )
         .column_spacing(1)
@@ -187,13 +188,21 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
 
 fn result_row(index: usize, track: &Track, is_current: bool) -> Row<'static> {
     let marker = if is_current { "▶" } else { "" };
-    let title = truncate(&track.title, 80);
-    let artist = truncate(&track.artist, 24);
+    let title = truncate(&track.title, 70);
+    let artist = truncate(&track.artist, 20);
+    let quality = format!("({})", track.quality_label());
     let title_style = if is_current {
         Style::default().fg(GREEN).bold()
     } else {
         Style::default()
     };
+    let quality_style = match track.quality {
+        Quality::Low => Style::default().fg(Color::Red),
+        Quality::Medium => Style::default().fg(Color::Yellow),
+        Quality::High => Style::default().fg(Color::Green),
+        Quality::Lossless => Style::default().fg(Color::Cyan),
+    };
+    
     Row::new(vec![
         Cell::from(format!("{marker:>2}")).style(Style::default().fg(GREEN)),
         Cell::from(track.source.badge()).style(Style::default().fg(source_color(track.source))),
@@ -201,6 +210,7 @@ fn result_row(index: usize, track: &Track, is_current: bool) -> Row<'static> {
         Cell::from(artist).style(Style::default().fg(MUTED)),
         Cell::from(Text::from(track.duration_label()).alignment(Alignment::Right))
             .style(Style::default().fg(MUTED)),
+        Cell::from(quality).style(quality_style),
     ])
     .style(if index.is_multiple_of(2) {
         Style::default()
@@ -245,16 +255,24 @@ fn draw_queue(frame: &mut Frame, app: &App, area: Rect) {
         Constraint::Min(10),
         Constraint::Length(14),
         Constraint::Length(6),
+        Constraint::Length(10),
     ];
     let rows = app.queue.iter().enumerate().map(|(index, track)| {
         let is_current = app.current == Some(index);
         let marker = if is_current { "▶" } else { " " };
-        let title = truncate(&track.title, 80);
+        let title = truncate(&track.title, 70);
         let artist = truncate(&track.artist, 14);
+        let quality = format!("({})", track.quality_label());
         let title_style = if is_current {
             Style::default().fg(GREEN).bold()
         } else {
             Style::default()
+        };
+        let quality_style = match track.quality {
+            Quality::Low => Style::default().fg(Color::Red),
+            Quality::Medium => Style::default().fg(Color::Yellow),
+            Quality::High => Style::default().fg(Color::Green),
+            Quality::Lossless => Style::default().fg(Color::Cyan),
         };
         Row::new(vec![
             Cell::from(format!("{marker:>2}")).style(Style::default().fg(GREEN)),
@@ -263,6 +281,7 @@ fn draw_queue(frame: &mut Frame, app: &App, area: Rect) {
             Cell::from(artist).style(Style::default().fg(MUTED)),
             Cell::from(Text::from(track.duration_label()).alignment(Alignment::Right))
                 .style(Style::default().fg(MUTED)),
+            Cell::from(quality).style(quality_style),
         ])
         .style(if index.is_multiple_of(2) {
             Style::default()
@@ -273,7 +292,7 @@ fn draw_queue(frame: &mut Frame, app: &App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(
-            Row::new(["", "#", "TITLE", "ARTIST", "TIME"]).style(Style::default().fg(MUTED).bold()),
+            Row::new(["", "#", "TITLE", "ARTIST", "TIME", "QUALITY"]).style(Style::default().fg(MUTED).bold()),
         )
         .column_spacing(1)
         .row_highlight_style(highlight_style(focused))
@@ -390,6 +409,15 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         spans.push(Span::raw(" "));
     }
+    
+    // Add quality filter indicator
+    if app.quality_filter != crate::model::QualityFilter::All {
+        spans.push(Span::styled(
+            format!(" [Filter: {}]", app.quality_filter.label()),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+    
     let color = if app.status_is_error {
         RED
     } else if loading {
@@ -410,6 +438,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("Ctrl+U", "clear"),
             ("@", "source"),
             ("#", "lyrics"),
+            ("q", "quality"),
             ("?", "help"),
             ("Ctrl+C", "quit"),
         ],
@@ -424,8 +453,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("/", "search"),
             ("Tab", "queue"),
             ("#", "lyrics"),
+            ("q", "quality"),
             ("?", "help"),
-            ("q", "quit"),
         ],
         Focus::Queue => &[
             ("Enter", "play"),
@@ -648,6 +677,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_line("J / K", "move queue item down / up"),
         help_line("g / G", "jump to first / last"),
         help_line("@", "switch YouTube / SoundCloud"),
+        help_line("q", "quality filter"),
         help_line("#", "toggle lyrics"),
         Line::from(Span::raw("")),
         section("LYRICS"),

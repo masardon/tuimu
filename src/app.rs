@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::input::TextInput;
 use crate::lyrics::{self, Lyrics};
-use crate::model::{RepeatMode, SearchSource, Track};
+use crate::model::{Quality, QualityFilter, RepeatMode, SearchSource, Track};
 use crate::mpv::{Mpv, MpvMessage};
 use crate::ytdlp::{self, Lookup, StreamInfo};
 
@@ -94,6 +94,7 @@ pub struct App {
     pub tick: u64,
     pub lyrics: LyricsState,
     pub lyrics_enabled: bool,
+    pub quality_filter: QualityFilter,
     prev_volume: f64,
     search_seq: u64,
     search_tx: Sender<SearchMessage>,
@@ -137,6 +138,7 @@ impl App {
             tick: 0,
             lyrics: LyricsState::default(),
             lyrics_enabled: true,
+            quality_filter: QualityFilter::All,
             prev_volume: 70.0,
             search_seq: 0,
             search_tx,
@@ -259,6 +261,11 @@ impl App {
         
         if key.code == KeyCode::Char('#') {
             self.toggle_lyrics();
+            return;
+        }
+        
+        if key.code == KeyCode::Char('q') {
+            self.cycle_quality_filter();
             return;
         }
 
@@ -993,5 +1000,48 @@ impl App {
     pub fn set_status(&mut self, message: impl Into<String>, is_error: bool) {
         self.status = message.into();
         self.status_is_error = is_error;
+    }
+
+    pub fn apply_quality_filter(&mut self) {
+        let original_count = self.results.len();
+        self.results.retain(|track| match self.quality_filter {
+            QualityFilter::All => true,
+            QualityFilter::Lossless => track.quality == Quality::Lossless,
+            QualityFilter::High => track.quality >= Quality::High,
+            QualityFilter::Medium => track.quality >= Quality::Medium,
+            QualityFilter::Low => track.quality >= Quality::Low,
+        });
+        
+        if self.results.len() < original_count {
+            self.set_status(
+                format!(
+                    "Filtered results: {} of {} tracks (quality: {})",
+                    self.results.len(),
+                    original_count,
+                    self.quality_filter.label()
+                ),
+                false
+            );
+            
+            // Adjust selected index if it's out of bounds
+            if self.result_selected >= self.results.len() {
+                self.result_selected = self.results.len().saturating_sub(1);
+            }
+        }
+    }
+
+    pub fn cycle_quality_filter(&mut self) {
+        self.quality_filter = match self.quality_filter {
+            QualityFilter::All => QualityFilter::Lossless,
+            QualityFilter::Lossless => QualityFilter::High,
+            QualityFilter::High => QualityFilter::Medium,
+            QualityFilter::Medium => QualityFilter::Low,
+            QualityFilter::Low => QualityFilter::All,
+        };
+        self.apply_quality_filter();
+    }
+
+    pub fn get_quality_filter(&self) -> QualityFilter {
+        self.quality_filter
     }
 }
