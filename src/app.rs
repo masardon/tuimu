@@ -250,6 +250,7 @@ impl App {
         }
         
         if key.code == KeyCode::F(2) {
+            println!("DEBUG: F2 key pressed, changing source");
             self.source = self.source.next();
             self.set_status(format!("Search source: {}", self.source.label()), false);
             return;
