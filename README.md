@@ -77,9 +77,9 @@ Or run in development: `cargo run`
 
 | Key | Action |
 |-----|--------|
-| **F1** | Toggle help window |
-| **F2** | Switch between YouTube and SoundCloud |
-| **F3** | Toggle lyrics window |
+| **?** | Toggle help window |
+| **@** | Switch between YouTube and SoundCloud |
+| **#** | Toggle lyrics window |
 | **Enter** | Play selected track / Start search |
 | **Esc** | Close lyrics/help / Go to results |
 | **Tab** | Switch focus (Search → Results → Queue) |
@@ -102,7 +102,7 @@ Or run in development: `cargo run`
 
 1. **Search for music**: 
    - Type a search query and press `Enter`
-   - Use `F2` to switch between YouTube and SoundCloud
+   - Use `@` to switch between YouTube and SoundCloud
    - Paste any URL directly into the search box (YouTube, SoundCloud, Spotify, etc.)
 
 2. **Navigate results**:
@@ -131,7 +131,7 @@ Or run in development: `cargo run`
    - Press `Esc` to close the lyrics window
 
 6. **Get help**:
-   - Press `F1` to toggle the help window
+   - Press `?` to toggle the help window
    - Press `Esc` to close the help window
 
 7. **Quit**:
@@ -225,7 +225,7 @@ rm -rf ~/.local/share/tuimu/
 - YouTube stream extraction uses yt-dlp's Android player client for reliability; the app relaunches mpv per source to send the required `Referer` headers without breaking playback.
 - All audio extraction goes through yt-dlp and is passed to mpv as a direct URL - no browser session or cookies are used.
 - The lyrics feature works with or without a currently playing track.
-- All function keys (F1, F2, F3) work regardless of the current focus state.
+- All special keys (?, @, #) work regardless of the current focus state.
 
 ## Troubleshooting
 
