@@ -408,9 +408,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("Esc", "results"),
             ("Tab", "next"),
             ("Ctrl+U", "clear"),
-            ("F2", "source"),
-            ("F3", "lyrics"),
-            ("F1", "help"),
+            ("@", "source"),
+            ("#", "lyrics"),
+            ("?", "help"),
             ("Ctrl+C", "quit"),
         ],
         Focus::Results => &[
@@ -423,7 +423,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("+/-", "volume"),
             ("/", "search"),
             ("Tab", "queue"),
-            ("F3", "lyrics"),
+            ("#", "lyrics"),
             ("?", "help"),
             ("q", "quit"),
         ],
@@ -613,7 +613,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ACCENT))
         .title(Span::styled(
-            " Help · F1 / Esc to close ",
+            " Help · ? / Esc to close ",
             Style::default().fg(ACCENT).bold(),
         ))
         .style(Style::default().bg(Color::Rgb(17, 17, 24)));
@@ -647,11 +647,11 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_line("d / Del", "remove queue item"),
         help_line("J / K", "move queue item down / up"),
         help_line("g / G", "jump to first / last"),
-        help_line("F2", "switch YouTube / SoundCloud"),
-        help_line("F3", "toggle lyrics"),
+        help_line("@", "switch YouTube / SoundCloud"),
+        help_line("#", "toggle lyrics"),
         Line::from(Span::raw("")),
         section("LYRICS"),
-        help_line("F3", "show/hide lyrics"),
+        help_line("#", "show/hide lyrics"),
         help_line("Space", "auto-follow on/off"),
         help_line("j / k", "scroll up/down"),
         help_line("PageUp/Down", "scroll page"),

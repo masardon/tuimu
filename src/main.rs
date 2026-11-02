@@ -61,13 +61,11 @@ fn event_loop(terminal: &mut Tui, app: &mut App) -> Result<()> {
         if event::poll(Duration::from_millis(80)).context("could not poll terminal events")? {
             match event::read().context("could not read terminal events")? {
                 Event::Key(key) => {
-                    // Handle F keys directly with highest priority
-                    if key.code == KeyCode::F(1) {
-                        app.help = !app.help;
-                    } else if key.code == KeyCode::F(2) {
+                    // Handle special keys directly with highest priority
+                    if key.code == KeyCode::Char('@') {
                         app.source = app.source.next();
                         app.set_status(format!("Search source: {}", app.source.label()), false);
-                    } else if key.code == KeyCode::F(3) {
+                    } else if key.code == KeyCode::Char('#') {
                         app.toggle_lyrics();
                     } else {
                         // Handle other keys normally

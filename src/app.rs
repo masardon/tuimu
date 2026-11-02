@@ -129,7 +129,7 @@ impl App {
                 ..PlayerState::default()
             },
             repeat: RepeatMode::Off,
-            status: "Type a search and press Enter. F1 help · F2 source.".into(),
+            status: "Type a search and press Enter. ? help · @ source.".into(),
             status_is_error: false,
             help: false,
             loading: false,
