@@ -7,6 +7,8 @@ use crate::ytdlp::curl_bin;
 
 const API_ROOT: &str = "https://lrclib.net/api";
 const USER_AGENT: &str = "tuimu/0.1.0 (terminal music player)";
+const MAX_RETRIES: usize = 3;
+const RETRY_DELAY: u64 = 2; // seconds
 
 #[derive(Clone, Debug, Default)]
 pub struct Lyrics {
@@ -80,22 +82,50 @@ pub fn fetch(artist: &str, title: &str, duration: Option<f64>) -> Result<Lyrics>
         durations.push(None);
 
         for duration in durations {
-            match fetch_exact(query, duration) {
-                Ok(Some(lyrics)) => return Ok(lyrics),
-                Ok(None) => {}
-                Err(error) => last_error = Some(error),
+            // Try with retries
+            for attempt in 0..MAX_RETRIES {
+                match fetch_exact(query, duration) {
+                    Ok(Some(lyrics)) => return Ok(lyrics),
+                    Ok(None) => break,
+                    Err(error) => {
+                        if attempt == MAX_RETRIES - 1 {
+                            last_error = Some(error);
+                        } else {
+                            // Wait before retrying
+                            std::thread::sleep(std::time::Duration::from_secs(RETRY_DELAY));
+                        }
+                    }
+                }
             }
         }
 
-        match fetch_search(query, duration) {
-            Ok(Some(lyrics)) => return Ok(lyrics),
-            Ok(None) => {}
-            Err(error) => last_error = Some(error),
+        // Try with retries for search
+        for attempt in 0..MAX_RETRIES {
+            match fetch_search(query, duration) {
+                Ok(Some(lyrics)) => return Ok(lyrics),
+                Ok(None) => break,
+                Err(error) => {
+                    if attempt == MAX_RETRIES - 1 {
+                        last_error = Some(error);
+                    } else {
+                        // Wait before retrying
+                        std::thread::sleep(std::time::Duration::from_secs(RETRY_DELAY));
+                    }
+                }
+            }
         }
     }
 
     match last_error {
-        Some(error) => Err(error),
+        Some(error) => {
+            // If we get a "server busy" error, return a more user-friendly message
+            let error_msg = error.to_string();
+            if error_msg.contains("server is busy") || error_msg.contains("503") {
+                anyhow::bail!("Lyrics service is temporarily unavailable. Please try again later.")
+            } else {
+                Err(error)
+            }
+        },
         None => Ok(Lyrics::default()),
     }
 }
@@ -151,12 +181,14 @@ fn get_json(endpoint: &str, params: &[(&str, String)]) -> Result<Value> {
     command.args([
         "-sS",
         "--max-time",
-        "15",
+        "10",
         "-A",
         USER_AGENT,
         "-H",
         "Accept: application/json",
         "--get",
+        "--connect-timeout",
+        "5",
     ]);
     for (key, value) in params {
         command.arg("--data-urlencode").arg(format!("{key}={value}"));
@@ -170,9 +202,30 @@ fn get_json(endpoint: &str, params: &[(&str, String)]) -> Result<Value> {
         .with_context(|| format!("failed to start `{bin}` for lyrics"))?;
 
     if !output.status.success() {
-        bail!("lyrics request failed: {}", stderr_excerpt(&output.stderr));
+        let error_msg = stderr_excerpt(&output.stderr);
+        // Handle specific error messages
+        if error_msg.contains("503") || error_msg.contains("server is busy") {
+            bail!("Lyrics service is temporarily busy. Please try again later.");
+        } else if error_msg.contains("timeout") {
+            bail!("Lyrics request timed out. Please try again.");
+        } else {
+            bail!("lyrics request failed: {}", error_msg);
+        }
     }
-    serde_json::from_slice(&output.stdout).context("lyrics service returned invalid JSON")
+    
+    let json = serde_json::from_slice(&output.stdout)
+        .context("lyrics service returned invalid JSON")?;
+    
+    // Check for service errors in the response
+    if let Some(error) = service_error(&json) {
+        if error.contains("503") || error.contains("server is busy") {
+            bail!("Lyrics service is temporarily busy. Please try again later.");
+        } else {
+            bail!("{}", error);
+        }
+    }
+    
+    Ok(json)
 }
 
 fn lyrics_from_object(value: &Value) -> Option<Lyrics> {
@@ -242,12 +295,25 @@ fn service_error(value: &Value) -> Option<String> {
     value
         .get("message")
         .and_then(Value::as_str)
-        .map(str::to_string)
+        .map(|msg| {
+            // Clean up common error messages
+            let msg = msg.trim();
+            if msg.contains("server is busy") || msg.contains("503") {
+                "Lyrics service is temporarily busy. Please try again later.".to_string()
+            } else {
+                msg.to_string()
+            }
+        })
         .or_else(|| {
             value
                 .get("statusCode")
                 .and_then(Value::as_u64)
-                .map(|code| format!("lyrics service returned HTTP {code}"))
+                .map(|code| match code {
+                    503 => "Lyrics service is temporarily busy. Please try again later.".to_string(),
+                    429 => "Too many requests. Please wait before trying again.".to_string(),
+                    404 => "Lyrics not found for this track.".to_string(),
+                    _ => format!("Lyrics service returned HTTP {}", code),
+                })
         })
 }
 
