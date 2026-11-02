@@ -93,6 +93,7 @@ pub struct App {
     pub loading: bool,
     pub tick: u64,
     pub lyrics: LyricsState,
+    pub lyrics_enabled: bool,
     prev_volume: f64,
     search_seq: u64,
     search_tx: Sender<SearchMessage>,
@@ -109,7 +110,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(mpv: Mpv) -> Self {
+    pub fn new(mpv: Mpv, _lyrics_enabled: bool) -> Self {
         let (search_tx, search_rx) = mpsc::channel();
         let (play_tx, play_rx) = mpsc::channel();
         let (lyrics_tx, lyrics_rx) = mpsc::channel();
@@ -135,6 +136,7 @@ impl App {
             loading: false,
             tick: 0,
             lyrics: LyricsState::default(),
+            lyrics_enabled: true,
             prev_volume: 70.0,
             search_seq: 0,
             search_tx,
@@ -243,21 +245,19 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-        // Handle F1, F2, F3 keys globally - highest priority
-        if key.code == KeyCode::F(1) {
+        // Handle help key globally - highest priority
+        if key.code == KeyCode::Char('?') {
             self.help = !self.help;
             return;
         }
         
-        if key.code == KeyCode::F(2) {
-            println!("DEBUG: F2 key pressed, changing source");
+        if key.code == KeyCode::Char('@') {
             self.source = self.source.next();
             self.set_status(format!("Search source: {}", self.source.label()), false);
             return;
         }
         
-        if key.code == KeyCode::F(3) {
-            println!("DEBUG: F3 key pressed, toggling lyrics");
+        if key.code == KeyCode::Char('#') {
             self.toggle_lyrics();
             return;
         }
@@ -348,7 +348,7 @@ impl App {
             KeyCode::Left => self.seek(-5.0),
             KeyCode::Right => self.seek(5.0),
             KeyCode::Char('?') => self.help = true,
-            KeyCode::F(3) => self.toggle_lyrics(),
+            KeyCode::Char('#') => self.toggle_lyrics(),
             _ => {}
         }
     }
@@ -383,7 +383,7 @@ impl App {
             KeyCode::Left => self.seek(-5.0),
             KeyCode::Right => self.seek(5.0),
             KeyCode::Char('?') => self.help = true,
-            KeyCode::F(3) => self.toggle_lyrics(),
+            KeyCode::Char('#') => self.toggle_lyrics(),
             _ => {}
         }
     }
@@ -498,6 +498,11 @@ impl App {
     }
 
     pub fn toggle_lyrics(&mut self) {
+        if !self.lyrics_enabled {
+            self.set_status("Lyrics are disabled. Enable them in the configuration.", true);
+            return;
+        }
+
         if self.lyrics.open {
             self.lyrics.open = false;
             return;

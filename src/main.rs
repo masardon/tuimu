@@ -11,6 +11,7 @@ use std::panic;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use clap::Parser;
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode};
 use crossterm::execute;
@@ -33,9 +34,10 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
-        print_help();
-        return Ok(());
+    let args = Args::parse();
+    
+    if args.no_lyrics {
+        println!("tuimu: Lyrics fetching disabled");
     }
 
     ytdlp::check_dependencies()?;
@@ -44,7 +46,7 @@ fn run() -> Result<()> {
     let mut terminal = init_terminal().context("could not initialize the terminal")?;
     install_panic_hook();
 
-    let mut app = App::new(mpv);
+    let mut app = App::new(mpv, !args.no_lyrics);
     let result = event_loop(&mut terminal, &mut app);
     let restore_result = restore_terminal(&mut terminal);
 
@@ -127,6 +129,18 @@ fn install_panic_hook() {
         let _ = disable_raw_mode();
         original(info);
     }));
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "tuimu",
+    about = "A fast, free terminal music player",
+    version,
+    author
+)]
+struct Args {
+    #[arg(short, long, help = "Disable lyrics fetching")]
+    no_lyrics: bool,
 }
 
 fn print_help() {
