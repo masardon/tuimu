@@ -243,42 +243,31 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
+        // Handle F1, F2, F3 keys globally - highest priority
         if key.code == KeyCode::F(1) {
             self.help = !self.help;
             return;
         }
-
-        if self.help {
-            if matches!(
-                key.code,
-                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
-            ) {
-                self.help = false;
-            }
-            return;
-        }
-
-        if key.code == KeyCode::F(3) {
-            self.toggle_lyrics();
-            return;
-        }
-
-        if self.lyrics.open {
-            self.handle_lyrics_key(key);
-            return;
-        }
-
+        
         if key.code == KeyCode::F(2) {
             self.source = self.source.next();
             self.set_status(format!("Search source: {}", self.source.label()), false);
             return;
         }
+        
+        if key.code == KeyCode::F(3) {
+            println!("DEBUG: F3 key pressed, toggling lyrics");
+            self.toggle_lyrics();
+            return;
+        }
 
+        // Handle Ctrl+C and Ctrl+Q for quitting
         if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q')) {
             self.should_quit = true;
             return;
         }
 
+        // Handle help window
         if self.help {
             if matches!(
                 key.code,
@@ -289,11 +278,13 @@ impl App {
             return;
         }
 
+        // Handle lyrics window
         if self.lyrics.open {
             self.handle_lyrics_key(key);
             return;
         }
 
+        // Handle focus-specific keys
         match self.focus {
             Focus::Search => self.handle_search_key(key, ctrl),
             Focus::Results => self.handle_results_key(key),
@@ -506,8 +497,11 @@ impl App {
     }
 
     fn toggle_lyrics(&mut self) {
+        println!("DEBUG: toggle_lyrics called, current open state: {}", self.lyrics.open);
+        
         if self.lyrics.open {
             self.lyrics.open = false;
+            println!("DEBUG: Lyrics closed");
             return;
         }
 
@@ -517,6 +511,7 @@ impl App {
         self.lyrics.error = None;
         self.lyrics.scroll = 0;
         self.lyrics.follow = true;
+        println!("DEBUG: Lyrics opened");
         
         if let Some(track) = self.current_track() {
             let track_url = track.url.clone();

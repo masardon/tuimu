@@ -60,7 +60,14 @@ fn event_loop(terminal: &mut Tui, app: &mut App) -> Result<()> {
 
         if event::poll(Duration::from_millis(80)).context("could not poll terminal events")? {
             match event::read().context("could not read terminal events")? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key),
+                Event::Key(key) => {
+                    // Debug output for all key events
+                    println!("DEBUG: Key event: {:?}, kind: {:?}", key.code, key.kind);
+                    
+                    if key.kind == KeyEventKind::Press {
+                        app.handle_key(key);
+                    }
+                },
                 Event::Paste(text) => app.handle_paste(&text),
                 Event::Resize(_, _) => {}
                 _ => {}
