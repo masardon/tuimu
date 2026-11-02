@@ -143,30 +143,4 @@ struct Args {
     no_lyrics: bool,
 }
 
-fn print_help() {
-    println!(
-        "tuimu {version} — a free music player for the terminal\n\
-         \n\
-         USAGE:\n  tuimu\n\
-         \n\
-         REQUIREMENTS:\n\
-           yt-dlp   finds and extracts audio (required)\n\
-           mpv      plays audio over JSON IPC (required)\n\
-           curl     reads Spotify metadata and LrcLib lyrics (optional)\n\
-         \n\
-         OPTIONS:\n\
-           -h, --help   show this help\n\
-         \n\
-         ENVIRONMENT:\n\
-           TUIMU_YTDLP  yt-dlp executable (default: yt-dlp)\n\
-           TUIMU_MPV    mpv executable (default: mpv)\n\
-           TUIMU_CURL   curl executable (default: curl)\n\
-         \n\
-         Search YouTube or SoundCloud, or paste any URL supported by yt-dlp.\n\
-         SoundCloud usually returns 30-second previews without an account.\n\
-         Spotify track URLs are matched to free YouTube audio because Spotify\n\
-         playback itself requires an authenticated account.\n\
-         Press l or F3 for lyrics (LrcLib, no account required).\n",
-        version = env!("CARGO_PKG_VERSION")
-    );
-}
+

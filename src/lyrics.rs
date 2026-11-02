@@ -253,9 +253,7 @@ fn get_json_with_timeout(endpoint: &str, params: &[(&str, String)], timeout: u64
     Ok(json)
 }
 
-fn get_json(endpoint: &str, params: &[(&str, String)]) -> Result<Value> {
-    get_json_with_timeout(endpoint, params, 10)
-}
+
 
 fn fetch_exact(query: &Query, duration: Option<f64>) -> Result<Option<Lyrics>> {
     let mut params = vec![
