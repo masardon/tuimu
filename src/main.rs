@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event};
+use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -61,8 +61,29 @@ fn event_loop(terminal: &mut Tui, app: &mut App) -> Result<()> {
         if event::poll(Duration::from_millis(80)).context("could not poll terminal events")? {
             match event::read().context("could not read terminal events")? {
                 Event::Key(key) => {
-                    // Handle all key events regardless of kind
-                    app.handle_key(key);
+                    // Debug output for all key events
+                    println!("DEBUG: Received key: {:?}", key);
+                    
+                    // Handle F keys directly
+                    match key.code {
+                        KeyCode::F(1) => {
+                            println!("DEBUG: Processing F1");
+                            app.help = !app.help;
+                        },
+                        KeyCode::F(2) => {
+                            println!("DEBUG: Processing F2");
+                            app.source = app.source.next();
+                            app.set_status(format!("Search source: {}", app.source.label()), false);
+                        },
+                        KeyCode::F(3) => {
+                            println!("DEBUG: Processing F3");
+                            app.toggle_lyrics();
+                        },
+                        _ => {
+                            // Handle other keys normally
+                            app.handle_key(key);
+                        }
+                    }
                 },
                 Event::Paste(text) => app.handle_paste(&text),
                 Event::Resize(_, _) => {}

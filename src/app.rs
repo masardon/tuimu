@@ -497,7 +497,7 @@ impl App {
         self.play_queue_index(self.queue_selected);
     }
 
-    fn toggle_lyrics(&mut self) {
+    pub fn toggle_lyrics(&mut self) {
         println!("DEBUG: toggle_lyrics called, current open state: {}", self.lyrics.open);
         
         if self.lyrics.open {
@@ -989,7 +989,7 @@ impl App {
         self.lyrics = LyricsState::default();
     }
 
-    fn set_status(&mut self, message: impl Into<String>, is_error: bool) {
+    pub fn set_status(&mut self, message: impl Into<String>, is_error: bool) {
         self.status = message.into();
         self.status_is_error = is_error;
     }
