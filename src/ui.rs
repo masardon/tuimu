@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table, TableState, Wrap},
 };
@@ -42,6 +42,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.help {
         draw_help(frame, area);
     }
+    if app.lyrics.open {
+        draw_lyrics(frame, app, area);
+    }
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -70,7 +73,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
-    let focused = app.focus == Focus::Search;
+    let focused = app.focus == Focus::Search || app.focus == Focus::Results;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style(focused))
@@ -406,6 +409,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("Tab", "next"),
             ("Ctrl+U", "clear"),
             ("F2", "source"),
+            ("F3", "lyrics"),
             ("F1", "help"),
             ("Ctrl+C", "quit"),
         ],
@@ -419,6 +423,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("+/-", "volume"),
             ("/", "search"),
             ("Tab", "queue"),
+            ("F3", "lyrics"),
             ("?", "help"),
             ("q", "quit"),
         ],
@@ -431,6 +436,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("r", "repeat"),
             ("/", "search"),
             ("Tab", "search"),
+            ("F3", "lyrics"),
             ("?", "help"),
             ("q", "quit"),
         ],
@@ -449,7 +455,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(vec![
             Line::from(spans),
             Line::from(Span::styled(
-                "yt-dlp finds the audio · mpv plays it · no account required",
+                "yt-dlp finds the audio · mpv plays it · LrcLib provides lyrics",
                 Style::default().fg(ACCENT_DIM).italic(),
             )),
         ])
@@ -457,6 +463,136 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().bg(PANEL_BG)),
         area,
     );
+}
+
+fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect) {
+    let width = area.width.saturating_sub(4).min(120);
+    let height = area.height.saturating_sub(2).min(30);
+    if width < 20 || height < 8 {
+        return;
+    }
+    let popup = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            " Lyrics · Esc to close ",
+            Style::default().fg(ACCENT).bold(),
+        ))
+        .style(Style::default().bg(Color::Rgb(17, 17, 24)));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    if inner.height == 0 {
+        return;
+    }
+
+    let content = if app.lyrics.loading {
+        vec![Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(spinner(app.tick), Style::default().fg(YELLOW)),
+            Span::styled(" Loading lyrics…", Style::default().fg(Color::White)),
+        ])]
+    } else if let Some(error) = &app.lyrics.error {
+        vec![Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled("✗", Style::default().fg(RED)),
+            Span::styled(format!(" Error: {}", error), Style::default().fg(Color::White)),
+        ])]
+    } else if app.lyrics.instrumental {
+        vec![Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled("♪", Style::default().fg(GREEN)),
+            Span::styled(" Instrumental", Style::default().fg(Color::White)),
+        ])]
+    } else if app.lyrics.lines.is_none() {
+        vec![Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled("—", Style::default().fg(MUTED)),
+            Span::styled(" No lyrics found", Style::default().fg(Color::White)),
+        ])]
+    } else if let Some(lines) = &app.lyrics.lines {
+        let mut content = Vec::new();
+        let start = 5; // app.lyrics_scroll_height() / 2;
+        let visible = 10; // app.lyrics_scroll_height();
+        let scroll_start = app.lyrics.scroll.saturating_sub(start);
+        let scroll_end = (scroll_start + visible).min(lines.synced.as_ref().map_or(0, |lines| lines.len()));
+
+        if scroll_start > 0 {
+            content.push(Line::from(vec![
+                Span::styled("   ", Style::default()),
+                Span::styled("⋮", Style::default().fg(MUTED)),
+            ]));
+        }
+
+        if let Some(synced_lines) = &lines.synced {
+            for (index, line) in synced_lines[scroll_start..scroll_end].iter().enumerate() {
+                let line_index = scroll_start + index;
+                let is_current = app.lyrics.follow
+                    && app.current_track().is_some()
+                    && app.lyrics.lines.as_ref().and_then(|l| l.current_line(app.player.position)) == Some(line_index);
+                let prefix = if is_current {
+                    Span::styled("▶ ", Style::default().fg(GREEN).bold())
+                } else {
+                    Span::styled("  ", Style::default())
+                };
+                let text = if is_current {
+                    Span::styled(&line.text, Style::default().fg(GREEN))
+                } else {
+                    Span::raw(&line.text)
+                };
+                content.push(Line::from(vec![prefix, text]));
+            }
+
+            if scroll_end < synced_lines.len() {
+                content.push(Line::from(vec![
+                    Span::styled("   ", Style::default()),
+                    Span::styled("⋮", Style::default().fg(MUTED)),
+                ]));
+            }
+        }
+
+        content
+    } else {
+        vec![]
+    };
+
+    let info = if app.lyrics.follow {
+        format!("{} · Auto-follow", app.lyrics.artist)
+    } else {
+        format!("{} · Manual scroll", app.lyrics.artist)
+    };
+    let info = Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(info, Style::default().fg(MUTED)),
+    ]);
+
+    let controls = Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled("Space", Style::default().fg(ACCENT)),
+        Span::styled(" auto-follow  ", Style::default().fg(MUTED)),
+        Span::styled("j/k", Style::default().fg(ACCENT)),
+        Span::styled(" scroll  ", Style::default().fg(MUTED)),
+        Span::styled("Esc/l", Style::default().fg(ACCENT)),
+        Span::styled(" close", Style::default().fg(MUTED)),
+    ]);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(content.len().min(inner.height as usize).try_into().unwrap()),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    frame.render_widget(Paragraph::new(content).wrap(Wrap { trim: true }), layout[1]);
+    frame.render_widget(Paragraph::new(info), layout[2]);
+    frame.render_widget(Paragraph::new(controls), layout[3]);
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
@@ -498,7 +634,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_line("+ / -", "volume"),
         help_line("m", "mute"),
         help_line("r", "repeat off → all → one"),
-        Line::raw(""),
+        Line::from(Span::raw("")),
         section("FOCUS"),
         help_line("Tab", "search → results → queue"),
         help_line("Shift+Tab", "cycle backwards"),
@@ -512,15 +648,23 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_line("J / K", "move queue item down / up"),
         help_line("g / G", "jump to first / last"),
         help_line("F2", "switch YouTube / SoundCloud"),
-        Line::raw(""),
+        help_line("F3", "toggle lyrics"),
+        Line::from(Span::raw("")),
+        section("LYRICS"),
+        help_line("F3", "show/hide lyrics"),
+        help_line("Space", "auto-follow on/off"),
+        help_line("j / k", "scroll up/down"),
+        help_line("PageUp/Down", "scroll page"),
+        help_line("Home/End", "scroll to start/end"),
+        Line::from(Span::raw("")),
         section("SOURCES"),
         help_line("Search", "YouTube, SoundCloud"),
         help_line("SoundCloud", "30s previews without login"),
         help_line("Paste URL", "anything yt-dlp supports"),
         help_line("Spotify", "track links matched to YouTube"),
-        Line::raw(""),
+        Line::from(Span::raw("")),
         Line::from(Span::styled(
-            "No login. No account. Just yt-dlp and mpv.",
+            "No login. No account. Just yt-dlp, mpv, and LrcLib.",
             Style::default().fg(GREEN).italic(),
         )),
         help_line("Ctrl+C", "quit"),
@@ -530,54 +674,55 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(right).wrap(Wrap { trim: true }), columns[1]);
 }
 
-fn help_line<'a>(key: &'a str, description: &'a str) -> Line<'a> {
+fn section<'a>(title: &'a str) -> Line<'a> {
     Line::from(vec![
-        Span::styled(format!("  {key:<10}"), Style::default().fg(ACCENT).bold()),
-        Span::styled(description, Style::default().fg(MUTED)),
+        Span::styled(title, Style::default().fg(ACCENT).bold()),
+        Span::raw(""),
     ])
 }
 
-fn section(title: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        title.to_string(),
-        Style::default().fg(YELLOW).bold(),
-    ))
+fn help_line<'a>(key: &'a str, description: &'a str) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(format!("  {key:<10}"), Style::default().fg(ACCENT).bold()),
+        Span::raw(description),
+    ])
+}
+
+fn spinner(tick: u64) -> &'static str {
+    const SPINNERS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    SPINNERS[((tick / 3) % SPINNERS.len() as u64) as usize]
 }
 
 fn border_style(focused: bool) -> Style {
     if focused {
         Style::default().fg(ACCENT)
     } else {
-        Style::default().fg(ACCENT_DIM)
+        Style::default().fg(MUTED)
     }
 }
 
 fn highlight_style(focused: bool) -> Style {
     if focused {
-        Style::default()
-            .bg(SELECT_BG)
-            .fg(ACCENT)
-            .add_modifier(Modifier::BOLD)
+        Style::default().bg(SELECT_BG)
     } else {
-        Style::default().bg(Color::Rgb(32, 30, 42)).fg(Color::Gray)
+        Style::default()
     }
 }
 
 fn source_color(source: Source) -> Color {
     match source {
-        Source::YouTube => Color::Rgb(255, 105, 105),
-        Source::SoundCloud => Color::Rgb(255, 165, 90),
-        Source::Bandcamp => Color::Rgb(100, 205, 200),
-        Source::Spotify => Color::Rgb(110, 220, 130),
-        Source::Web => MUTED,
+        Source::YouTube => Color::Rgb(220, 60, 60),
+        Source::SoundCloud => Color::Rgb(30, 140, 255),
+        Source::Bandcamp => Color::Rgb(10, 150, 100),
+        Source::Spotify => Color::Rgb(30, 215, 96),
+        Source::Web => Color::Rgb(100, 100, 100),
     }
 }
 
-fn repeat_label(repeat: RepeatMode) -> &'static str {
-    repeat.label()
-}
-
-fn spinner(tick: u64) -> &'static str {
-    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    FRAMES[(tick as usize / 2) % FRAMES.len()]
+fn repeat_label(mode: RepeatMode) -> &'static str {
+    match mode {
+        RepeatMode::Off => "off",
+        RepeatMode::All => "all",
+        RepeatMode::One => "one",
+    }
 }

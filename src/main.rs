@@ -1,5 +1,6 @@
 mod app;
 mod input;
+mod lyrics;
 mod model;
 mod mpv;
 mod ui;
@@ -124,7 +125,7 @@ fn print_help() {
          REQUIREMENTS:\n\
            yt-dlp   finds and extracts audio (required)\n\
            mpv      plays audio over JSON IPC (required)\n\
-           curl     reads public Spotify track metadata (optional)\n\
+           curl     reads Spotify metadata and LrcLib lyrics (optional)\n\
          \n\
          OPTIONS:\n\
            -h, --help   show this help\n\
@@ -137,7 +138,8 @@ fn print_help() {
          Search YouTube or SoundCloud, or paste any URL supported by yt-dlp.\n\
          SoundCloud usually returns 30-second previews without an account.\n\
          Spotify track URLs are matched to free YouTube audio because Spotify\n\
-         playback itself requires an authenticated account.\n",
+         playback itself requires an authenticated account.\n\
+         Press l or F3 for lyrics (LrcLib, no account required).\n",
         version = env!("CARGO_PKG_VERSION")
     );
 }

@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 
@@ -5,6 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 
 use crate::input::TextInput;
+use crate::lyrics::{self, Lyrics};
 use crate::model::{RepeatMode, SearchSource, Track};
 use crate::mpv::{Mpv, MpvMessage};
 use crate::ytdlp::{self, Lookup, StreamInfo};
@@ -54,6 +56,25 @@ struct PlayMessage {
     result: Result<StreamInfo, String>,
 }
 
+struct LyricsMessage {
+    track_url: String,
+    result: Result<Lyrics, String>,
+}
+
+#[derive(Debug, Default)]
+pub struct LyricsState {
+    pub open: bool,
+    pub track_url: Option<String>,
+    pub title: String,
+    pub artist: String,
+    pub lines: Option<Lyrics>,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub scroll: usize,
+    pub follow: bool,
+    pub instrumental: bool,
+}
+
 pub struct App {
     pub should_quit: bool,
     pub focus: Focus,
@@ -71,6 +92,7 @@ pub struct App {
     pub help: bool,
     pub loading: bool,
     pub tick: u64,
+    pub lyrics: LyricsState,
     prev_volume: f64,
     search_seq: u64,
     search_tx: Sender<SearchMessage>,
@@ -78,6 +100,10 @@ pub struct App {
     play_seq: u64,
     play_tx: Sender<PlayMessage>,
     play_rx: Receiver<PlayMessage>,
+    lyrics_tx: Sender<LyricsMessage>,
+    lyrics_rx: Receiver<LyricsMessage>,
+    lyrics_pending: HashSet<String>,
+    lyrics_cache: HashMap<String, Result<Lyrics, String>>,
     mpv: Mpv,
     mpv_closed: bool,
 }
@@ -86,6 +112,7 @@ impl App {
     pub fn new(mpv: Mpv) -> Self {
         let (search_tx, search_rx) = mpsc::channel();
         let (play_tx, play_rx) = mpsc::channel();
+        let (lyrics_tx, lyrics_rx) = mpsc::channel();
         Self {
             should_quit: false,
             focus: Focus::Search,
@@ -107,6 +134,7 @@ impl App {
             help: false,
             loading: false,
             tick: 0,
+            lyrics: LyricsState::default(),
             prev_volume: 70.0,
             search_seq: 0,
             search_tx,
@@ -114,6 +142,10 @@ impl App {
             play_seq: 0,
             play_tx,
             play_rx,
+            lyrics_tx,
+            lyrics_rx,
+            lyrics_pending: HashSet::new(),
+            lyrics_cache: HashMap::new(),
             mpv,
             mpv_closed: false,
         }
@@ -121,6 +153,10 @@ impl App {
 
     pub fn current_track(&self) -> Option<&Track> {
         self.current.and_then(|index| self.queue.get(index))
+    }
+
+    pub fn current_track_url(&self) -> Option<&str> {
+        self.current_track().map(|track| track.url.as_str())
     }
 
     pub fn poll_background(&mut self) {
@@ -134,6 +170,40 @@ impl App {
             if message.seq == self.play_seq {
                 self.handle_play_result(message);
             }
+        }
+
+        while let Ok(message) = self.lyrics_rx.try_recv() {
+            if self.lyrics.track_url.as_deref() == Some(&message.track_url)
+                || self.current_track_url() == Some(&message.track_url)
+            {
+                self.lyrics_pending.remove(&message.track_url);
+                self.lyrics_cache.insert(message.track_url.clone(), message.result.clone());
+                if self.lyrics.open && self.lyrics.track_url.as_deref() == Some(&message.track_url) {
+                    match &message.result {
+                        Ok(lyrics) => {
+                            self.lyrics.lines = Some(lyrics.clone());
+                            self.lyrics.loading = false;
+                            self.lyrics.error = None;
+                            self.lyrics.instrumental = lyrics.instrumental;
+                            if self.lyrics.follow {
+                                self.scroll_to_current_lyric();
+                            }
+                        }
+                        Err(error) => {
+                            self.lyrics.lines = None;
+                            self.lyrics.loading = false;
+                            self.lyrics.error = Some(error.clone());
+                        }
+                    }
+                }
+            } else {
+                self.lyrics_pending.remove(&message.track_url);
+                self.lyrics_cache.insert(message.track_url.clone(), message.result);
+            }
+        }
+
+        if self.lyrics.open && self.lyrics.follow {
+            self.scroll_to_current_lyric();
         }
 
         if self.mpv_closed {
@@ -173,11 +243,6 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-        if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q')) {
-            self.should_quit = true;
-            return;
-        }
-
         if key.code == KeyCode::F(1) {
             self.help = !self.help;
             return;
@@ -193,9 +258,39 @@ impl App {
             return;
         }
 
+        if key.code == KeyCode::F(3) {
+            self.toggle_lyrics();
+            return;
+        }
+
+        if self.lyrics.open {
+            self.handle_lyrics_key(key);
+            return;
+        }
+
         if key.code == KeyCode::F(2) {
             self.source = self.source.next();
             self.set_status(format!("Search source: {}", self.source.label()), false);
+            return;
+        }
+
+        if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q')) {
+            self.should_quit = true;
+            return;
+        }
+
+        if self.help {
+            if matches!(
+                key.code,
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
+            ) {
+                self.help = false;
+            }
+            return;
+        }
+
+        if self.lyrics.open {
+            self.handle_lyrics_key(key);
             return;
         }
 
@@ -261,6 +356,7 @@ impl App {
             KeyCode::Left => self.seek(-5.0),
             KeyCode::Right => self.seek(5.0),
             KeyCode::Char('?') => self.help = true,
+            KeyCode::F(3) => self.toggle_lyrics(),
             _ => {}
         }
     }
@@ -295,6 +391,7 @@ impl App {
             KeyCode::Left => self.seek(-5.0),
             KeyCode::Right => self.seek(5.0),
             KeyCode::Char('?') => self.help = true,
+            KeyCode::F(3) => self.toggle_lyrics(),
             _ => {}
         }
     }
@@ -313,7 +410,8 @@ impl App {
         self.loading = true;
         self.results.clear();
         self.result_selected = 0;
-        self.focus = Focus::Results;
+        // Keep focus on Search to allow typing while results load
+        self.focus = Focus::Search;
         self.set_status(
             format!("Searching {} for \"{}\"…", self.source.label(), query),
             false,
@@ -407,6 +505,119 @@ impl App {
         self.play_queue_index(self.queue_selected);
     }
 
+    fn toggle_lyrics(&mut self) {
+        if self.lyrics.open {
+            self.lyrics.open = false;
+            return;
+        }
+
+        // Open lyrics window even if no track is playing
+        self.lyrics.open = true;
+        self.lyrics.loading = false;
+        self.lyrics.error = None;
+        self.lyrics.scroll = 0;
+        self.lyrics.follow = true;
+        
+        if let Some(track) = self.current_track() {
+            let track_url = track.url.clone();
+            let title = track.title.clone();
+            let artist = track.artist.clone();
+            let duration = track.duration;
+
+            let needs_fetch = !self.lyrics_pending.contains(&track_url) && !self.lyrics_cache.contains_key(&track_url);
+            if needs_fetch {
+                self.lyrics_pending.insert(track_url.clone());
+
+                self.lyrics.loading = true;
+                self.lyrics.error = None;
+                self.lyrics.title = title.clone();
+                self.lyrics.artist = artist.clone();
+                self.lyrics.track_url = Some(track_url.clone());
+
+                let tx = self.lyrics_tx.clone();
+                thread::Builder::new()
+                    .name("lyrics".into())
+                    .spawn(move || {
+                        let result = lyrics::fetch(&artist, &title, duration)
+                            .map_err(|error| format!("Could not fetch lyrics: {error:#}"));
+                        let _ = tx.send(LyricsMessage {
+                            track_url,
+                            result,
+                        });
+                    })
+                    .unwrap();
+            }
+            self.lyrics.open = true;
+            self.lyrics.follow = true;
+            self.lyrics.scroll = 0;
+        } else {
+            self.set_status("No track playing.", true);
+        }
+    }
+
+    fn handle_lyrics_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => {
+                self.lyrics.open = false;
+            }
+            KeyCode::Char(' ') => {
+                self.lyrics.follow = !self.lyrics.follow;
+                if self.lyrics.follow {
+                    self.scroll_to_current_lyric();
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.lyrics.scroll = self.lyrics.scroll.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(lines) = &self.lyrics.lines {
+                    self.lyrics.scroll = (self.lyrics.scroll + 1).min(lines.line_count().saturating_sub(1));
+                }
+            }
+            KeyCode::PageUp => {
+                self.lyrics.scroll = self.lyrics.scroll.saturating_sub(5);
+            }
+            KeyCode::PageDown => {
+                if let Some(lines) = &self.lyrics.lines {
+                    self.lyrics.scroll = (self.lyrics.scroll + 5).min(lines.line_count().saturating_sub(1));
+                }
+            }
+            KeyCode::Home => {
+                self.lyrics.scroll = 0;
+            }
+            KeyCode::End => {
+                if let Some(lines) = &self.lyrics.lines {
+                    self.lyrics.scroll = lines.line_count().saturating_sub(1);
+                }
+            }
+            KeyCode::Char('c') if ctrl => {
+                self.lyrics.open = false;
+            }
+            _ => {}
+        }
+    }
+
+    fn scroll_to_current_lyric(&mut self) {
+        if !self.lyrics.follow || self.lyrics.lines.is_none() {
+            return;
+        }
+        if let (Some(lines), Some(_current)) = (&self.lyrics.lines, self.current_track()) {
+            if let Some(line_index) = lines.current_line(self.player.position) {
+                let half = self.lyrics_scroll_height() / 2;
+                if line_index < self.lyrics.scroll {
+                    self.lyrics.scroll = line_index;
+                } else if line_index >= self.lyrics.scroll + half {
+                    self.lyrics.scroll = (line_index + 1).saturating_sub(half);
+                }
+            }
+        }
+    }
+
+    fn lyrics_scroll_height(&self) -> usize {
+        10
+    }
+
     fn play_queue_index(&mut self, index: usize) {
         let Some(track) = self.queue.get(index).cloned() else {
             return;
@@ -417,6 +628,10 @@ impl App {
         self.player.position = 0.0;
         self.player.duration = track.duration.unwrap_or(0.0);
         self.player.paused = false;
+        self.lyrics = LyricsState::default();
+        self.lyrics.track_url = Some(track.url.clone());
+        self.lyrics.title = track.title.clone();
+        self.lyrics.artist = track.artist.clone();
 
         if self.mpv_closed {
             self.player.loading = false;
@@ -520,6 +735,7 @@ impl App {
                 let _ = self.mpv.stop();
             }
             self.reset_player();
+            self.lyrics = LyricsState::default();
         } else if let Some(current) = self.current
             && index < current
         {
@@ -774,6 +990,7 @@ impl App {
         self.player.duration = 0.0;
         self.player.loading = false;
         self.player.paused = true;
+        self.lyrics = LyricsState::default();
     }
 
     fn set_status(&mut self, message: impl Into<String>, is_error: bool) {
