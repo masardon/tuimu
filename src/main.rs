@@ -61,32 +61,17 @@ fn event_loop(terminal: &mut Tui, app: &mut App) -> Result<()> {
         if event::poll(Duration::from_millis(80)).context("could not poll terminal events")? {
             match event::read().context("could not read terminal events")? {
                 Event::Key(key) => {
-                    // Debug output for all key events
-                    println!("DEBUG: Received key: {:?}", key);
-                    
-                    // Handle F keys directly
-                    match key.code {
-                        KeyCode::F(1) => {
-                            println!("DEBUG: Processing F1 - current help state: {}", app.help);
-                            app.help = !app.help;
-                            println!("DEBUG: New help state: {}", app.help);
-                        },
-                        KeyCode::F(2) => {
-                            println!("DEBUG: Processing F2 - current source: {:?}", app.source);
-                            app.source = app.source.next();
-                            let new_source = app.source.label();
-                            println!("DEBUG: New source: {}", new_source);
-                            app.set_status(format!("Search source: {}", new_source), false);
-                        },
-                        KeyCode::F(3) => {
-                            println!("DEBUG: Processing F3 - current lyrics state: {}", app.lyrics.open);
-                            app.toggle_lyrics();
-                            println!("DEBUG: New lyrics state: {}", app.lyrics.open);
-                        },
-                        _ => {
-                            // Handle other keys normally
-                            app.handle_key(key);
-                        }
+                    // Handle F keys directly with highest priority
+                    if key.code == KeyCode::F(1) {
+                        app.help = !app.help;
+                    } else if key.code == KeyCode::F(2) {
+                        app.source = app.source.next();
+                        app.set_status(format!("Search source: {}", app.source.label()), false);
+                    } else if key.code == KeyCode::F(3) {
+                        app.toggle_lyrics();
+                    } else {
+                        // Handle other keys normally
+                        app.handle_key(key);
                     }
                 },
                 Event::Paste(text) => app.handle_paste(&text),

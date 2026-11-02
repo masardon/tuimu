@@ -498,11 +498,8 @@ impl App {
     }
 
     pub fn toggle_lyrics(&mut self) {
-        println!("DEBUG: toggle_lyrics called, current open state: {}", self.lyrics.open);
-        
         if self.lyrics.open {
             self.lyrics.open = false;
-            println!("DEBUG: Lyrics closed");
             return;
         }
 
@@ -512,7 +509,6 @@ impl App {
         self.lyrics.error = None;
         self.lyrics.scroll = 0;
         self.lyrics.follow = true;
-        println!("DEBUG: Lyrics opened");
         
         if let Some(track) = self.current_track() {
             let track_url = track.url.clone();
