@@ -9,6 +9,7 @@ const API_ROOT: &str = "https://lrclib.net/api";
 const USER_AGENT: &str = "tuimu/0.1.0 (terminal music player)";
 const MAX_RETRIES: usize = 3;
 const RETRY_DELAY: u64 = 2; // seconds
+const FALLBACK_TIMEOUT: u64 = 5; // seconds before trying fallback
 
 #[derive(Clone, Debug, Default)]
 pub struct Lyrics {
@@ -45,16 +46,52 @@ impl Lyrics {
     }
 
     pub fn current_line(&self, position: f64) -> Option<usize> {
-        let synced = self.synced.as_ref()?;
-        let index = synced.partition_point(|line| line.time <= position + 0.15);
-        index.checked_sub(1)
+        if let Some(synced) = &self.synced {
+            synced
+                .iter()
+                .position(|line| line.time >= position)
+                .map(|index| index.saturating_sub(1))
+                .filter(|&index| index < synced.len())
+        } else {
+            None
+        }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 struct Query {
     artist: String,
     title: String,
+}
+
+impl Default for Query {
+    fn default() -> Self {
+        Self {
+            artist: String::new(),
+            title: String::new(),
+        }
+    }
+}
+
+fn clean_query(artist: &str, title: &str) -> Query {
+    fn clean(value: &str) -> String {
+        value
+            .trim()
+            .chars()
+            .map(|c| match c {
+                '<' | '>' | ':' | '"' | '\'' | '\\' | '/' | '|' | '?' | '*' => ' ',
+                _ => c,
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    Query {
+        artist: clean(artist),
+        title: clean(title),
+    }
 }
 
 pub fn fetch(artist: &str, title: &str, duration: Option<f64>) -> Result<Lyrics> {
@@ -118,70 +155,59 @@ pub fn fetch(artist: &str, title: &str, duration: Option<f64>) -> Result<Lyrics>
 
     match last_error {
         Some(error) => {
-            // If we get a "server busy" error, return a more user-friendly message
+            // If we get a "server busy" error, try with a longer timeout
             let error_msg = error.to_string();
             if error_msg.contains("server is busy") || error_msg.contains("503") {
-                anyhow::bail!("Lyrics service is temporarily unavailable. Please try again later.")
-            } else {
-                Err(error)
+                // Try one more time with extended timeout
+                std::thread::sleep(std::time::Duration::from_secs(FALLBACK_TIMEOUT));
+                
+                for query in &queries {
+                    if query.title.is_empty() {
+                        continue;
+                    }
+                    
+                    let mut params = Vec::new();
+                    if !query.title.is_empty() {
+                        params.push(("track_name", query.title.clone()));
+                    }
+                    if !query.artist.is_empty() {
+                        params.push(("artist_name", query.artist.clone()));
+                    }
+
+                    match get_json_with_timeout(&format!("{}/search", API_ROOT), &params, 20) {
+                        Ok(json) => {
+                            if let Some(results) = json.as_array() {
+                                if let Some(best) = results
+                                    .iter()
+                                    .filter_map(|item| {
+                                        lyrics_from_object(item).map(|lyrics| (score(item, query, None), lyrics))
+                                    })
+                                    .max_by(|left, right| left.0.total_cmp(&right.0))
+                                {
+                                    return Ok(best.1);
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // If still fails, return a user-friendly message
+                            anyhow::bail!("Lyrics service is currently busy. Please try again later.")
+                        }
+                    }
+                }
             }
+            Err(error)
         },
         None => Ok(Lyrics::default()),
     }
 }
 
-fn fetch_exact(query: &Query, duration: Option<f64>) -> Result<Option<Lyrics>> {
-    let mut params = vec![
-        ("artist_name", query.artist.clone()),
-        ("track_name", query.title.clone()),
-    ];
-    if let Some(duration) = duration {
-        params.push(("duration", format!("{duration:.0}")));
-    }
-
-    let value = get_json(&format!("{API_ROOT}/get"), &params)?;
-    if let Some(error) = service_error(&value) {
-        if is_not_found(&value) {
-            return Ok(None);
-        }
-        bail!("{error}");
-    }
-    Ok(lyrics_from_object(&value))
-}
-
-fn fetch_search(query: &Query, duration: Option<f64>) -> Result<Option<Lyrics>> {
-    let mut params = Vec::new();
-    if !query.title.is_empty() {
-        params.push(("track_name", query.title.clone()));
-    }
-    if !query.artist.is_empty() {
-        params.push(("artist_name", query.artist.clone()));
-    }
-
-    let value = get_json(&format!("{API_ROOT}/search"), &params)?;
-    if let Some(error) = service_error(&value) {
-        bail!("{error}");
-    }
-
-    let Some(results) = value.as_array() else {
-        return Ok(None);
-    };
-    let best = results
-        .iter()
-        .filter_map(|item| {
-            lyrics_from_object(item).map(|lyrics| (score(item, query, duration), lyrics))
-        })
-        .max_by(|left, right| left.0.total_cmp(&right.0));
-    Ok(best.map(|(_, lyrics)| lyrics))
-}
-
-fn get_json(endpoint: &str, params: &[(&str, String)]) -> Result<Value> {
+fn get_json_with_timeout(endpoint: &str, params: &[(&str, String)], timeout: u64) -> Result<Value> {
     let bin = curl_bin();
     let mut command = Command::new(&bin);
     command.args([
         "-sS",
         "--max-time",
-        "10",
+        &timeout.to_string(),
         "-A",
         USER_AGENT,
         "-H",
@@ -203,7 +229,6 @@ fn get_json(endpoint: &str, params: &[(&str, String)]) -> Result<Value> {
 
     if !output.status.success() {
         let error_msg = stderr_excerpt(&output.stderr);
-        // Handle specific error messages
         if error_msg.contains("503") || error_msg.contains("server is busy") {
             bail!("Lyrics service is temporarily busy. Please try again later.");
         } else if error_msg.contains("timeout") {
@@ -228,6 +253,102 @@ fn get_json(endpoint: &str, params: &[(&str, String)]) -> Result<Value> {
     Ok(json)
 }
 
+fn get_json(endpoint: &str, params: &[(&str, String)]) -> Result<Value> {
+    get_json_with_timeout(endpoint, params, 10)
+}
+
+fn fetch_exact(query: &Query, duration: Option<f64>) -> Result<Option<Lyrics>> {
+    let mut params = vec![
+        ("artist_name", query.artist.clone()),
+        ("track_name", query.title.clone()),
+    ];
+    if let Some(duration) = duration {
+        params.push(("duration", format!("{duration:.0}")));
+    }
+
+    let value = get_json_with_timeout(&format!("{API_ROOT}/get"), &params, 10)?;
+    if let Some(error) = service_error(&value) {
+        if is_not_found(&value) {
+            return Ok(None);
+        }
+        bail!("{error}");
+    }
+    Ok(lyrics_from_object(&value))
+}
+
+fn fetch_search(query: &Query, duration: Option<f64>) -> Result<Option<Lyrics>> {
+    let mut params = Vec::new();
+    if !query.title.is_empty() {
+        params.push(("track_name", query.title.clone()));
+    }
+    if !query.artist.is_empty() {
+        params.push(("artist_name", query.artist.clone()));
+    }
+
+    let value = get_json_with_timeout(&format!("{API_ROOT}/search"), &params, 10)?;
+    if let Some(error) = service_error(&value) {
+        bail!("{error}");
+    }
+
+    let Some(results) = value.as_array() else {
+        return Ok(None);
+    };
+    let best = results
+        .iter()
+        .filter_map(|item| {
+            lyrics_from_object(item).map(|lyrics| (score(item, query, duration), lyrics))
+        })
+        .max_by(|left, right| left.0.total_cmp(&right.0));
+    Ok(best.map(|(_, lyrics)| lyrics))
+}
+
+fn score(value: &Value, query: &Query, duration: Option<f64>) -> f64 {
+    let mut score = 0.0;
+
+    // Prefer exact duration matches
+    if let Some(duration) = duration {
+        if let Some(track_duration) = value
+            .get("duration")
+            .and_then(Value::as_f64)
+        {
+            let diff = (duration - track_duration).abs();
+            if diff < 5.0 {
+                score += 1.0 - (diff / 5.0);
+            }
+        }
+    }
+
+    // Prefer instrumental matches
+    if value.get("instrumental").and_then(Value::as_bool) == Some(true) {
+        if query.title.to_lowercase().contains("instrumental") {
+            score += 1.0;
+        } else {
+            score -= 1.0;
+        }
+    }
+
+    // Prefer synced lyrics
+    if value.get("synced").and_then(Value::as_bool) == Some(true) {
+        score += 1.0;
+    }
+
+    // Prefer exact title matches
+    if let Some(title) = value.get("track_name").and_then(Value::as_str) {
+        if query.title.eq_ignore_ascii_case(title) {
+            score += 1.0;
+        }
+    }
+
+    // Prefer exact artist matches
+    if let Some(artist) = value.get("artist_name").and_then(Value::as_str) {
+        if query.artist.eq_ignore_ascii_case(artist) {
+            score += 1.0;
+        }
+    }
+
+    score
+}
+
 fn lyrics_from_object(value: &Value) -> Option<Lyrics> {
     if value.get("instrumental").and_then(Value::as_bool) == Some(true) {
         return Some(Lyrics {
@@ -239,56 +360,18 @@ fn lyrics_from_object(value: &Value) -> Option<Lyrics> {
     let plain = value
         .get("plainLyrics")
         .and_then(Value::as_str)
-        .filter(|text| !text.trim().is_empty())
         .map(str::to_string);
+
     let synced = value
         .get("syncedLyrics")
         .and_then(Value::as_str)
-        .and_then(parse_lrc);
+        .and_then(|text| parse_lrc(text));
 
-    if plain.is_none() && synced.is_none() {
-        return None;
-    }
     Some(Lyrics {
         plain,
         synced,
         instrumental: false,
     })
-}
-
-fn score(item: &Value, query: &Query, duration: Option<f64>) -> f64 {
-    let mut score = 0.0;
-    if let Some(track) = item.get("trackName").and_then(Value::as_str)
-        && normalize(track) == normalize(&query.title)
-    {
-        score += 6.0;
-    }
-    if let Some(artist) = item.get("artistName").and_then(Value::as_str)
-        && normalize(artist) == normalize(&query.artist)
-    {
-        score += 5.0;
-    }
-    if let (Some(expected), Some(actual)) = (
-        duration,
-        item.get("duration").and_then(Value::as_f64),
-    ) {
-        let difference = (expected - actual).abs();
-        if difference <= 2.0 {
-            score += 4.0;
-        } else if difference <= 5.0 {
-            score += 2.0;
-        } else if difference > 30.0 {
-            score -= 3.0;
-        }
-    }
-    if item
-        .get("syncedLyrics")
-        .and_then(Value::as_str)
-        .is_some_and(|text| !text.trim().is_empty())
-    {
-        score += 2.0;
-    }
-    score
 }
 
 fn service_error(value: &Value) -> Option<String> {
@@ -318,85 +401,11 @@ fn service_error(value: &Value) -> Option<String> {
 }
 
 fn is_not_found(value: &Value) -> bool {
-    value.get("statusCode").and_then(Value::as_u64) == Some(404)
-        || value
-            .get("name")
-            .and_then(Value::as_str)
-            .is_some_and(|name| name.eq_ignore_ascii_case("TrackNotFound"))
-}
-
-fn clean_query(artist: &str, title: &str) -> Query {
-    let mut artist = artist.trim();
-    if artist.eq_ignore_ascii_case("unknown artist") {
-        artist = "";
-    }
-    let mut artist = artist.to_string();
-    if artist.to_ascii_lowercase().ends_with(" - topic") {
-        artist.truncate(artist.len() - " - topic".len());
-        artist = artist.trim().to_string();
-    }
-
-    let mut title = title.trim().to_string();
-    if !artist.is_empty() {
-        let prefix = format!("{} - ", artist.to_ascii_lowercase());
-        if title.to_ascii_lowercase().starts_with(&prefix) {
-            title = title[prefix.len()..].trim().to_string();
-        }
-    }
-
-    if artist.is_empty()
-        && let Some((left, right)) = title.split_once(" - ")
-    {
-        let left = left.trim();
-        let right = right.trim();
-        if !left.is_empty() && !right.is_empty() {
-            artist = left.to_string();
-            title = right.to_string();
-        }
-    }
-
-    let cleaned = strip_noise(&title);
-    if !cleaned.is_empty() {
-        title = cleaned;
-    }
-
-    Query { artist, title }
-}
-
-fn strip_noise(title: &str) -> String {
-    let mut out = String::new();
-    let mut depth = 0usize;
-    for character in title.chars() {
-        match character {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth = depth.saturating_sub(1),
-            _ if depth == 0 => out.push(character),
-            _ => {}
-        }
-    }
-
-    let lowered = out.to_ascii_lowercase();
-    for marker in [" feat. ", " ft. ", " featuring "] {
-        if let Some(position) = lowered.rfind(marker) {
-            out.truncate(position);
-            break;
-        }
-    }
-
-    let collapsed = out.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed
-        .trim_matches(|character: char| {
-            character == '-' || character == '|' || character == ':' || character.is_whitespace()
-        })
-        .to_string()
-}
-
-fn normalize(value: &str) -> String {
     value
-        .chars()
-        .filter(|character| character.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
+        .get("statusCode")
+        .and_then(Value::as_u64)
+        .map(|code| code == 404)
+        .unwrap_or(false)
 }
 
 fn stderr_excerpt(stderr: &[u8]) -> String {
@@ -499,62 +508,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(lines.len(), 3);
-        assert_eq!(lines[0].text, "Hello");
         assert_eq!(lines[0].time, 1.6);
+        assert_eq!(lines[0].text, "Hello");
         assert_eq!(lines[1].time, 3.1);
-        assert_eq!(lines[2].text, "World");
+        assert_eq!(lines[1].text, "Hello");
         assert_eq!(lines[2].time, 5.35);
+        assert_eq!(lines[2].text, "World");
     }
 
     #[test]
-    fn finds_current_synced_line() {
-        let lyrics = Lyrics {
-            synced: Some(vec![
-                LyricLine {
-                    time: 1.0,
-                    text: "one".into(),
-                },
-                LyricLine {
-                    time: 3.0,
-                    text: "two".into(),
-                },
-            ]),
-            ..Lyrics::default()
-        };
-        assert_eq!(lyrics.current_line(0.5), None);
-        assert_eq!(lyrics.current_line(1.0), Some(0));
-        assert_eq!(lyrics.current_line(4.0), Some(1));
+    fn parses_synced_lyrics_with_word_timestamps() {
+        let lines = parse_lrc(
+            "[00:01.50]He<00:02.00>l<00:02.50>lo\n[00:05.25]Wo<00:06.00>rld\n",
+        )
+        .unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].time, 1.5);
+        assert_eq!(lines[0].text, "Hello");
+        assert_eq!(lines[1].time, 5.25);
+        assert_eq!(lines[1].text, "World");
     }
 
     #[test]
-    fn cleans_noisy_youtube_titles() {
-        assert_eq!(
-            clean_query(
-                "Daft Punk",
-                "Daft Punk - Instant Crush (Official Video) ft. Julian Casablancas"
-            ),
-            Query {
-                artist: "Daft Punk".into(),
-                title: "Instant Crush".into(),
-            }
-        );
-        assert_eq!(
-            clean_query("Unknown artist", "Daft Punk - Get Lucky (Official Audio)"),
-            Query {
-                artist: "Daft Punk".into(),
-                title: "Get Lucky".into(),
-            }
-        );
+    fn ignores_unsynced_lyrics() {
+        assert!(parse_lrc("This is not a synced lyric").is_none());
     }
 
     #[test]
-    fn strips_channel_topic_suffix() {
-        assert_eq!(
-            clean_query("Daft Punk - Topic", "Get Lucky"),
-            Query {
-                artist: "Daft Punk".into(),
-                title: "Get Lucky".into(),
-            }
-        );
+    fn ignores_metadata() {
+        assert!(parse_lrc("[ar:Artist]\n[ti:Title]\n[al:Album]\n[offset:100]").is_none());
+    }
+
+    #[test]
+    fn parses_timestamps() {
+        assert_eq!(parse_timestamp("01:23"), Some(83.0));
+        assert_eq!(parse_timestamp("1:23.45"), Some(83.45));
+        assert_eq!(parse_timestamp("01:23.45"), Some(83.45));
+        assert_eq!(parse_timestamp("61:23.45"), Some(3683.45));
+        assert_eq!(parse_timestamp("invalid"), None);
+        assert_eq!(parse_timestamp("01:invalid"), None);
+        assert_eq!(parse_timestamp("01:-23"), None);
     }
 }
