@@ -100,12 +100,23 @@ pub struct Track {
     pub quality: Quality,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Quality {
     Low,     // < 128kbps, poor quality
     Medium,  // 128-256kbps, standard quality
     High,    // 256-320kbps, good quality
     Lossless, // FLAC, etc., lossless quality
+}
+
+impl Quality {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+            Self::Lossless => "Lossless",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -138,7 +138,7 @@ impl App {
             tick: 0,
             lyrics: LyricsState::default(),
             lyrics_enabled: true,
-            quality_filter: QualityFilter::All,
+            quality_filter: QualityFilter::High, // Default to high quality
             prev_volume: 70.0,
             search_seq: 0,
             search_tx,
@@ -358,6 +358,7 @@ impl App {
             KeyCode::Char('#') => self.toggle_lyrics(),
             KeyCode::Char('Q') => self.sort_by_quality(),
             KeyCode::Char('T') => self.sort_by_duration(),
+            KeyCode::Char('W') => self.toggle_high_quality_only(),
             _ => {}
         }
     }
@@ -395,6 +396,7 @@ impl App {
             KeyCode::Char('#') => self.toggle_lyrics(),
             KeyCode::Char('Q') => self.sort_by_quality(),
             KeyCode::Char('T') => self.sort_by_duration(),
+            KeyCode::Char('W') => self.toggle_high_quality_only(),
             _ => {}
         }
     }
@@ -1009,6 +1011,8 @@ impl App {
 
     pub fn apply_quality_filter(&mut self) {
         let original_count = self.results.len();
+        let before_filter = self.quality_filter;
+        
         self.results.retain(|track| match self.quality_filter {
             QualityFilter::All => true,
             QualityFilter::Lossless => track.quality == Quality::Lossless,
@@ -1018,21 +1022,50 @@ impl App {
         });
         
         if self.results.len() < original_count {
+            let _filtered_count = original_count - self.results.len();
+            let quality_name = before_filter.label();
+            
             self.set_status(
                 format!(
-                    "Filtered results: {} of {} tracks (quality: {})",
+                    "Filtered: {} of {} tracks (quality: {})",
                     self.results.len(),
                     original_count,
-                    self.quality_filter.label()
+                    quality_name
                 ),
                 false
             );
+            
+            // Show detailed quality breakdown
+            let quality_breakdown = self.get_quality_breakdown();
+            if !quality_breakdown.is_empty() {
+                self.set_status(
+                    format!("Quality breakdown: {}", quality_breakdown),
+                    false
+                );
+            }
             
             // Adjust selected index if it's out of bounds
             if self.result_selected >= self.results.len() {
                 self.result_selected = self.results.len().saturating_sub(1);
             }
         }
+    }
+
+    fn get_quality_breakdown(&self) -> String {
+        let mut breakdown = std::collections::HashMap::new();
+        
+        for track in &self.results {
+            *breakdown.entry(track.quality).or_insert(0) += 1;
+        }
+        
+        let mut breakdown: Vec<_> = breakdown.into_iter().collect();
+        breakdown.sort_by(|a, b| b.0.cmp(&a.0));
+        
+        breakdown
+            .into_iter()
+            .map(|(quality, count)| format!("{}: {}", quality.label(), count))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     pub fn cycle_quality_filter(&mut self) {
@@ -1060,5 +1093,22 @@ impl App {
             a.duration.unwrap_or(0.0).total_cmp(&b.duration.unwrap_or(0.0))
         });
         self.set_status("Results sorted by duration".to_string(), false);
+    }
+
+    pub fn set_quality_preference(&mut self, quality: QualityFilter) {
+        self.quality_filter = quality;
+        self.apply_quality_filter();
+        self.set_status(
+            format!("Quality preference set to {}", quality.label()),
+            false
+        );
+    }
+
+    pub fn toggle_high_quality_only(&mut self) {
+        if self.quality_filter == QualityFilter::High || self.quality_filter == QualityFilter::Lossless {
+            self.set_quality_preference(QualityFilter::All);
+        } else {
+            self.set_quality_preference(QualityFilter::High);
+        }
     }
 }

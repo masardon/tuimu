@@ -441,6 +441,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("q", "quality filter"),
             ("Q", "sort by quality"),
             ("T", "sort by duration"),
+            ("W", "toggle high quality"),
             ("?", "help"),
             ("Ctrl+C", "quit"),
         ],
@@ -458,6 +459,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("q", "quality filter"),
             ("Q", "sort by quality"),
             ("T", "sort by duration"),
+            ("W", "toggle high quality"),
             ("?", "help"),
         ],
         Focus::Queue => &[
