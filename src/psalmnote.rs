@@ -1,7 +1,6 @@
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
 
 use crate::ytdlp::curl_bin;
 use crate::model::Track;
