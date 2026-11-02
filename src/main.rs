@@ -67,17 +67,21 @@ fn event_loop(terminal: &mut Tui, app: &mut App) -> Result<()> {
                     // Handle F keys directly
                     match key.code {
                         KeyCode::F(1) => {
-                            println!("DEBUG: Processing F1");
+                            println!("DEBUG: Processing F1 - current help state: {}", app.help);
                             app.help = !app.help;
+                            println!("DEBUG: New help state: {}", app.help);
                         },
                         KeyCode::F(2) => {
-                            println!("DEBUG: Processing F2");
+                            println!("DEBUG: Processing F2 - current source: {:?}", app.source);
                             app.source = app.source.next();
-                            app.set_status(format!("Search source: {}", app.source.label()), false);
+                            let new_source = app.source.label();
+                            println!("DEBUG: New source: {}", new_source);
+                            app.set_status(format!("Search source: {}", new_source), false);
                         },
                         KeyCode::F(3) => {
-                            println!("DEBUG: Processing F3");
+                            println!("DEBUG: Processing F3 - current lyrics state: {}", app.lyrics.open);
                             app.toggle_lyrics();
+                            println!("DEBUG: New lyrics state: {}", app.lyrics.open);
                         },
                         _ => {
                             // Handle other keys normally
@@ -101,6 +105,8 @@ fn event_loop(terminal: &mut Tui, app: &mut App) -> Result<()> {
 fn init_terminal() -> Result<Tui> {
     enable_raw_mode().context("could not enable raw mode")?;
     let mut stdout = io::stdout();
+    
+    // Set terminal to handle all keys including F keys
     if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, Hide) {
         let _ = disable_raw_mode();
         return Err(error).context("could not enter the alternate screen");
