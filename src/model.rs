@@ -372,8 +372,6 @@ mod tests {
 
     #[test]
     fn quality_filter_logic() {
-        use crate::app::QualityFilter;
-
         // Test All filter
         assert!(matches!(QualityFilter::All, _));
         

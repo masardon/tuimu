@@ -73,6 +73,8 @@ pub struct LyricsState {
     pub scroll: usize,
     pub follow: bool,
     pub instrumental: bool,
+    pub source: Option<String>,
+    pub is_indonesian: bool,
 }
 
 pub struct App {
@@ -192,6 +194,8 @@ impl App {
                             self.lyrics.loading = false;
                             self.lyrics.error = None;
                             self.lyrics.instrumental = lyrics.instrumental;
+                            self.lyrics.source = lyrics.source.clone();
+                            self.lyrics.is_indonesian = lyrics.is_indonesian;
                             if self.lyrics.follow {
                                 self.scroll_to_current_lyric();
                             }

@@ -490,7 +490,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(vec![
             Line::from(spans),
             Line::from(Span::styled(
-                "yt-dlp finds the audio · mpv plays it · LrcLib provides lyrics",
+                "yt-dlp finds the audio · mpv plays it · LrcLib & PsalmNote provide lyrics",
                 Style::default().fg(ACCENT_DIM).italic(),
             )),
         ])
@@ -608,6 +608,21 @@ fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(info, Style::default().fg(MUTED)),
     ]);
 
+    // Add source information
+    let source_info = if let Some(source) = &app.lyrics.source {
+        let source_text = if app.lyrics.is_indonesian {
+            format!("Source: {} (Indonesian)", source)
+        } else {
+            format!("Source: {}", source)
+        };
+        Some(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(source_text, Style::default().fg(Color::Yellow)),
+        ]))
+    } else {
+        None
+    };
+
     let controls = Line::from(vec![
         Span::styled("  ", Style::default()),
         Span::styled("Space", Style::default().fg(ACCENT)),
@@ -622,12 +637,19 @@ fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(1),
         Constraint::Length(content.len().min(inner.height as usize).try_into().unwrap()),
         Constraint::Length(1),
+        Constraint::Length(if source_info.is_some() { 1 } else { 0 }),
         Constraint::Length(1),
     ])
     .split(inner);
     frame.render_widget(Paragraph::new(content).wrap(Wrap { trim: true }), layout[1]);
     frame.render_widget(Paragraph::new(info), layout[2]);
-    frame.render_widget(Paragraph::new(controls), layout[3]);
+    let source_info_index = if let Some(ref source_info) = source_info {
+        frame.render_widget(Paragraph::new(source_info.clone()), layout[3]);
+        1
+    } else {
+        0
+    };
+    frame.render_widget(Paragraph::new(controls), layout[source_info_index + 3]);
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {

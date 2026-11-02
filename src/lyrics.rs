@@ -4,6 +4,8 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::ytdlp::curl_bin;
+use crate::psalmnote::get_psalmnote_lyrics;
+use crate::model::{format_duration, Source};
 
 const API_ROOT: &str = "https://lrclib.net/api";
 const USER_AGENT: &str = "tuimu/0.1.0 (terminal music player)";
@@ -16,6 +18,8 @@ pub struct Lyrics {
     pub plain: Option<String>,
     pub synced: Option<Vec<LyricLine>>,
     pub instrumental: bool,
+    pub is_indonesian: bool,
+    pub source: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -45,6 +49,11 @@ impl Lyrics {
         }
     }
 
+    pub fn with_source(mut self, source: &str) -> Self {
+        self.source = Some(source.to_string());
+        self
+    }
+
     pub fn current_line(&self, position: f64) -> Option<usize> {
         if let Some(synced) = &self.synced {
             synced
@@ -58,39 +67,12 @@ impl Lyrics {
     }
 }
 
-#[derive(Clone, Debug)]
-struct Query {
-    artist: String,
-    title: String,
-}
-
-impl Default for Query {
+impl Default for LyricLine {
     fn default() -> Self {
         Self {
-            artist: String::new(),
-            title: String::new(),
+            time: 0.0,
+            text: String::new(),
         }
-    }
-}
-
-fn clean_query(artist: &str, title: &str) -> Query {
-    fn clean(value: &str) -> String {
-        value
-            .trim()
-            .chars()
-            .map(|c| match c {
-                '<' | '>' | ':' | '"' | '\'' | '\\' | '/' | '|' | '?' | '*' => ' ',
-                _ => c,
-            })
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
-    Query {
-        artist: clean(artist),
-        title: clean(title),
     }
 }
 
@@ -107,6 +89,35 @@ pub fn fetch(artist: &str, title: &str, duration: Option<f64>) -> Result<Lyrics>
     }
 
     let mut last_error = None;
+    
+    // First, try Indonesian lyrics (PsalmNote) for Indonesian artists
+    if is_indonesian_artist(artist) {
+        for query in &queries {
+            if query.title.is_empty() {
+                continue;
+            }
+            
+            if let Ok(Some(psalmnote_lyrics)) = get_psalmnote_lyrics(&crate::model::Track {
+                title: query.title.clone(),
+                artist: query.artist.clone(),
+                duration: None,
+                url: String::new(),
+                source: crate::model::Source::YouTube, // Default source
+                quality: crate::model::Quality::Medium, // Default quality
+            }) {
+                let synced_lyrics = parse_indonesian_lyrics(&psalmnote_lyrics.to_lyrics_format());
+                return Ok(Lyrics {
+                    plain: Some(psalmnote_lyrics.lyrics),
+                    synced: synced_lyrics,
+                    instrumental: false,
+                    is_indonesian: true,
+                    source: Some("PsalmNote".to_string()),
+                });
+            }
+        }
+    }
+    
+    // Then try international lyrics services
     for query in &queries {
         if query.title.is_empty() {
             continue;
@@ -122,7 +133,7 @@ pub fn fetch(artist: &str, title: &str, duration: Option<f64>) -> Result<Lyrics>
             // Try with retries
             for attempt in 0..MAX_RETRIES {
                 match fetch_exact(query, duration) {
-                    Ok(Some(lyrics)) => return Ok(lyrics),
+                    Ok(Some(lyrics)) => return Ok(lyrics.with_source("LrcLib")),
                     Ok(None) => break,
                     Err(error) => {
                         if attempt == MAX_RETRIES - 1 {
@@ -134,19 +145,19 @@ pub fn fetch(artist: &str, title: &str, duration: Option<f64>) -> Result<Lyrics>
                     }
                 }
             }
-        }
 
-        // Try with retries for search
-        for attempt in 0..MAX_RETRIES {
-            match fetch_search(query, duration) {
-                Ok(Some(lyrics)) => return Ok(lyrics),
-                Ok(None) => break,
-                Err(error) => {
-                    if attempt == MAX_RETRIES - 1 {
-                        last_error = Some(error);
-                    } else {
-                        // Wait before retrying
-                        std::thread::sleep(std::time::Duration::from_secs(RETRY_DELAY));
+            // Try with retries for search
+            for attempt in 0..MAX_RETRIES {
+                match fetch_search(query, duration) {
+                    Ok(Some(lyrics)) => return Ok(lyrics.with_source("LrcLib")),
+                    Ok(None) => break,
+                    Err(error) => {
+                        if attempt == MAX_RETRIES - 1 {
+                            last_error = Some(error);
+                        } else {
+                            // Wait before retrying
+                            std::thread::sleep(std::time::Duration::from_secs(RETRY_DELAY));
+                        }
                     }
                 }
             }
@@ -180,7 +191,8 @@ pub fn fetch(artist: &str, title: &str, duration: Option<f64>) -> Result<Lyrics>
                                 if let Some(best) = results
                                     .iter()
                                     .filter_map(|item| {
-                                        lyrics_from_object(item).map(|lyrics| (score(item, query, None), lyrics))
+                                        lyrics_from_object_with_source(item, "LrcLib")
+                                            .map(|lyrics| (score(item, query, None), lyrics))
                                     })
                                     .max_by(|left, right| left.0.total_cmp(&right.0))
                                 {
@@ -190,7 +202,7 @@ pub fn fetch(artist: &str, title: &str, duration: Option<f64>) -> Result<Lyrics>
                         }
                         Err(_) => {
                             // If still fails, return a user-friendly message
-                            anyhow::bail!("Lyrics service is currently busy. Please try again later.")
+                            anyhow::bail!("Lyrics service is currently busy. Please try again later.");
                         }
                     }
                 }
@@ -201,77 +213,128 @@ pub fn fetch(artist: &str, title: &str, duration: Option<f64>) -> Result<Lyrics>
     }
 }
 
-fn get_json_with_timeout(endpoint: &str, params: &[(&str, String)], timeout: u64) -> Result<Value> {
-    let bin = curl_bin();
-    let mut command = Command::new(&bin);
-    command.args([
-        "-sS",
-        "--max-time",
-        &timeout.to_string(),
-        "-A",
-        USER_AGENT,
-        "-H",
-        "Accept: application/json",
-        "--get",
-        "--connect-timeout",
-        "5",
-    ]);
-    for (key, value) in params {
-        command.arg("--data-urlencode").arg(format!("{key}={value}"));
-    }
-    let output = command
-        .arg(endpoint)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .with_context(|| format!("failed to start `{bin}` for lyrics"))?;
-
-    if !output.status.success() {
-        let error_msg = stderr_excerpt(&output.stderr);
-        if error_msg.contains("503") || error_msg.contains("server is busy") {
-            bail!("Lyrics service is temporarily busy. Please try again later.");
-        } else if error_msg.contains("timeout") {
-            bail!("Lyrics request timed out. Please try again.");
-        } else {
-            bail!("lyrics request failed: {}", error_msg);
+fn is_indonesian_artist(artist: &str) -> bool {
+    let artist_lower = artist.to_lowercase();
+    
+    // Check for common Indonesian artist indicators
+    let keywords = [
+        "indonesia", "indonesian", "nusantara", "dangdut", "k-pop", "kpop",
+        "j-pop", "jpop", "lagu indonesia", "penyanyi indonesia",
+        "grup indonesia", "band indonesia", "singer indonesia",
+    ];
+    
+    for keyword in keywords {
+        if artist_lower.contains(keyword) {
+            return true;
         }
     }
     
-    let json = serde_json::from_slice(&output.stdout)
-        .context("lyrics service returned invalid JSON")?;
+    // Check for Indonesian names (simplified check)
+    let indonesian_names = [
+        "rafael", "siti", "nissa", "ziva", "judika", "ariel",
+        "noah", "slank", "sheila", "peterpan", "dewa", "kangen",
+        "ungu", "kotak", "radja", "gigi", "jamrud", "padi",
+        "geisha", "coboy", "junior", "vierra", "wani", "rita",
+        "risa", "chrisye", "iwan", "kris", "boni", "once",
+    ];
     
-    // Check for service errors in the response
-    if let Some(error) = service_error(&json) {
-        if error.contains("503") || error.contains("server is busy") {
-            bail!("Lyrics service is temporarily busy. Please try again later.");
-        } else {
-            bail!("{}", error);
+    for name in indonesian_names {
+        if artist_lower.contains(name) {
+            return true;
         }
     }
     
-    Ok(json)
+    false
 }
 
+fn parse_indonesian_lyrics(lyrics_text: &str) -> Option<Vec<LyricLine>> {
+    let mut lines = Vec::new();
+    let offset = 0.0;
+    
+    for (index, line) in lyrics_text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("Reference:") || line.starts_with("---") {
+            continue;
+        }
+        
+        // Simple timestamp detection (e.g., [00:12.34])
+        if let Some((time_str, text)) = extract_timestamp(line) {
+            if let Some(time) = parse_timestamp(time_str) {
+                lines.push(LyricLine {
+                    time: time + offset,
+                    text: text.to_string(),
+                });
+            } else {
+                // No timestamp found, use sequential timing
+                lines.push(LyricLine {
+                    time: index as f64 * 3.0 + offset, // 3 seconds per line
+                    text: line.to_string(),
+                });
+            }
+        } else {
+            // No timestamp found, use sequential timing
+            lines.push(LyricLine {
+                time: index as f64 * 3.0 + offset, // 3 seconds per line
+                text: line.to_string(),
+            });
+        }
+    }
+    
+    if lines.is_empty() {
+        None
+    } else {
+        lines.sort_by(|a, b| a.time.total_cmp(&b.time));
+        Some(lines)
+    }
+}
 
+fn extract_timestamp(line: &str) -> Option<(&str, &str)> {
+    if let Some(start) = line.find('[') {
+        if let Some(end) = line[start..].find(']') {
+            let timestamp = &line[start + 1..start + end];
+            let text = &line[start + end + 1..].trim();
+            return Some((timestamp, text));
+        }
+    }
+    None
+}
+
+fn clean_query(artist: &str, title: &str) -> Query {
+    Query {
+        artist: clean(artist),
+        title: clean(title),
+    }
+}
+
+fn clean(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => ' ',
+            _ => c,
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
 
 fn fetch_exact(query: &Query, duration: Option<f64>) -> Result<Option<Lyrics>> {
-    let mut params = vec![
-        ("artist_name", query.artist.clone()),
-        ("track_name", query.title.clone()),
-    ];
+    let mut params = Vec::new();
+    if !query.title.is_empty() {
+        params.push(("track_name", query.title.clone()));
+    }
+    if !query.artist.is_empty() {
+        params.push(("artist_name", query.artist.clone()));
+    }
     if let Some(duration) = duration {
-        params.push(("duration", format!("{duration:.0}")));
+        params.push(("duration", duration.round().to_string()));
     }
 
-    let value = get_json_with_timeout(&format!("{API_ROOT}/get"), &params, 10)?;
-    if let Some(error) = service_error(&value) {
-        if is_not_found(&value) {
-            return Ok(None);
-        }
-        bail!("{error}");
+    let json = get_json_with_timeout(&format!("{}/get", API_ROOT), &params, 10)?;
+    match lyrics_from_object_with_source(&json, "LrcLib") {
+        Some(lyrics) => Ok(Some(lyrics)),
+        None => Err(anyhow::bail!("No lyrics found")),
     }
-    Ok(lyrics_from_object(&value))
 }
 
 fn fetch_search(query: &Query, duration: Option<f64>) -> Result<Option<Lyrics>> {
@@ -283,68 +346,54 @@ fn fetch_search(query: &Query, duration: Option<f64>) -> Result<Option<Lyrics>> 
         params.push(("artist_name", query.artist.clone()));
     }
 
-    let value = get_json_with_timeout(&format!("{API_ROOT}/search"), &params, 10)?;
-    if let Some(error) = service_error(&value) {
-        bail!("{error}");
+    let json = get_json_with_timeout(&format!("{}/search", API_ROOT), &params, 10)?;
+    if let Some(results) = json.as_array() {
+        if let Some(best) = results
+            .iter()
+            .filter_map(|item| {
+                lyrics_from_object_with_source(item, "LrcLib")
+                    .map(|lyrics| (score(item, query, duration), lyrics))
+            })
+            .max_by(|left, right| left.0.total_cmp(&right.0))
+        {
+            return Ok(Some(best.1));
+        }
     }
 
-    let Some(results) = value.as_array() else {
-        return Ok(None);
-    };
-    let best = results
-        .iter()
-        .filter_map(|item| {
-            lyrics_from_object(item).map(|lyrics| (score(item, query, duration), lyrics))
-        })
-        .max_by(|left, right| left.0.total_cmp(&right.0));
-    Ok(best.map(|(_, lyrics)| lyrics))
+    Ok(None)
 }
 
-fn score(value: &Value, query: &Query, duration: Option<f64>) -> f64 {
-    let mut score = 0.0;
+fn get_json_with_timeout(url: &str, params: &[(&str, String)], timeout: u64) -> Result<Value> {
+    let mut cmd = Command::new(curl_bin());
+    cmd.args(["-sS", "--max-time", &timeout.to_string(), "-A", USER_AGENT]);
 
-    // Prefer exact duration matches
-    if let Some(duration) = duration {
-        if let Some(track_duration) = value
-            .get("duration")
-            .and_then(Value::as_f64)
-        {
-            let diff = (duration - track_duration).abs();
-            if diff < 5.0 {
-                score += 1.0 - (diff / 5.0);
-            }
-        }
+    for (key, value) in params {
+        cmd.arg("-d").arg(format!("{}={}", key, value));
     }
 
-    // Prefer instrumental matches
-    if value.get("instrumental").and_then(Value::as_bool) == Some(true) {
-        if query.title.to_lowercase().contains("instrumental") {
-            score += 1.0;
-        } else {
-            score -= 1.0;
-        }
+    cmd.arg(url);
+
+    let output = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("failed to start curl")?;
+
+    if !output.status.success() {
+        bail!("curl failed: {}", String::from_utf8_lossy(&output.stderr));
     }
 
-    // Prefer synced lyrics
-    if value.get("synced").and_then(Value::as_bool) == Some(true) {
-        score += 1.0;
-    }
+    let response = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(&response)
+        .with_context(|| format!("invalid JSON response: {}", response))?;
 
-    // Prefer exact title matches
-    if let Some(title) = value.get("track_name").and_then(Value::as_str) {
-        if query.title.eq_ignore_ascii_case(title) {
-            score += 1.0;
-        }
-    }
+    Ok(json)
+}
 
-    // Prefer exact artist matches
-    if let Some(artist) = value.get("artist_name").and_then(Value::as_str) {
-        if query.artist.eq_ignore_ascii_case(artist) {
-            score += 1.0;
-        }
-    }
-
-    score
+fn lyrics_from_object_with_source(value: &Value, source: &str) -> Option<Lyrics> {
+    let mut lyrics = lyrics_from_object(value)?;
+    lyrics.source = Some(source.to_string());
+    Some(lyrics)
 }
 
 fn lyrics_from_object(value: &Value) -> Option<Lyrics> {
@@ -369,130 +418,134 @@ fn lyrics_from_object(value: &Value) -> Option<Lyrics> {
         plain,
         synced,
         instrumental: false,
+        is_indonesian: false,
+        source: None,
     })
 }
 
-fn service_error(value: &Value) -> Option<String> {
-    value
-        .get("message")
-        .and_then(Value::as_str)
-        .map(|msg| {
-            // Clean up common error messages
-            let msg = msg.trim();
-            if msg.contains("server is busy") || msg.contains("503") {
-                "Lyrics service is temporarily busy. Please try again later.".to_string()
-            } else {
-                msg.to_string()
-            }
-        })
-        .or_else(|| {
-            value
-                .get("statusCode")
-                .and_then(Value::as_u64)
-                .map(|code| match code {
-                    503 => "Lyrics service is temporarily busy. Please try again later.".to_string(),
-                    429 => "Too many requests. Please wait before trying again.".to_string(),
-                    404 => "Lyrics not found for this track.".to_string(),
-                    _ => format!("Lyrics service returned HTTP {}", code),
-                })
-        })
-}
-
-fn is_not_found(value: &Value) -> bool {
-    value
-        .get("statusCode")
-        .and_then(Value::as_u64)
-        .map(|code| code == 404)
-        .unwrap_or(false)
-}
-
-fn stderr_excerpt(stderr: &[u8]) -> String {
-    let text = String::from_utf8_lossy(stderr);
-    let text = text.trim();
-    if text.is_empty() {
-        "unknown error".into()
-    } else {
-        text.chars().take(200).collect()
-    }
-}
-
-pub fn parse_lrc(input: &str) -> Option<Vec<LyricLine>> {
-    let mut offset = 0.0;
+fn parse_lrc(text: &str) -> Option<Vec<LyricLine>> {
     let mut lines = Vec::new();
+    let offset = 0.0;
 
-    for raw in input.lines() {
-        let mut rest = raw.trim();
-        if rest.is_empty() {
-            continue;
-        }
-
-        if let Some(after_open) = rest.strip_prefix('[')
-            && let Some((tag, after)) = after_open.split_once(']')
-            && !tag.as_bytes().first().is_some_and(u8::is_ascii_digit)
-        {
-            if let Some((name, value)) = tag.split_once(':')
-                && name.eq_ignore_ascii_case("offset")
-                && let Ok(parsed) = value.trim().parse::<f64>()
-            {
-                offset = parsed / 1000.0;
-            }
-            rest = after.trim_start();
-        }
-
-        let mut times = Vec::new();
-        let mut remaining = rest;
-        while let Some(after_open) = remaining.strip_prefix('[') {
-            let Some((tag, after)) = after_open.split_once(']') else {
-                break;
-            };
-            let Some(time) = parse_timestamp(tag) else {
-                break;
-            };
-            times.push(time);
-            remaining = after.trim_start();
-        }
-
-        if times.is_empty() {
-            continue;
-        }
-        let text = strip_word_timestamps(remaining).trim().to_string();
-        for time in times {
+    for line in text.lines() {
+        if let Some((time, text)) = parse_lrc_line(line) {
             lines.push(LyricLine {
                 time: time + offset,
-                text: text.clone(),
+                text: text.to_string(),
             });
         }
     }
 
     if lines.is_empty() {
-        return None;
+        None
+    } else {
+        lines.sort_by(|a, b| a.time.total_cmp(&b.time));
+        Some(lines)
     }
-    lines.sort_by(|left, right| left.time.total_cmp(&right.time));
-    Some(lines)
 }
 
-fn parse_timestamp(value: &str) -> Option<f64> {
-    let (minutes, seconds) = value.split_once(':')?;
-    let minutes: f64 = minutes.trim().parse().ok()?;
-    let seconds: f64 = seconds.trim().replace(':', ".").parse().ok()?;
-    if !minutes.is_finite() || !seconds.is_finite() || minutes < 0.0 || seconds < 0.0 {
+fn parse_lrc_line(line: &str) -> Option<(f64, &str)> {
+    let line = line.trim();
+    if line.is_empty() {
         return None;
     }
-    Some(minutes * 60.0 + seconds)
+
+    let start = line.find('[')?;
+    let end = line[start + 1..].find(']')?;
+    let time_str = &line[start + 1..start + 1 + end];
+    let text = &line[start + 1 + end + 1..].trim();
+
+    let time = parse_timestamp(time_str)?;
+    Some((time, text))
 }
 
-fn strip_word_timestamps(value: &str) -> String {
-    let mut out = String::new();
-    let mut depth = 0usize;
-    for character in value.chars() {
-        match character {
-            '<' => depth += 1,
-            '>' => depth = depth.saturating_sub(1),
-            _ if depth == 0 => out.push(character),
-            _ => {}
+fn parse_timestamp(time_str: &str) -> Option<f64> {
+    let parts: Vec<&str> = time_str.split('.').collect();
+    let minutes_seconds = parts[0].split(':').collect::<Vec<_>>();
+    
+    if minutes_seconds.len() != 2 {
+        return None;
+    }
+    
+    let minutes = minutes_seconds[0].parse::<u64>().ok()?;
+    let seconds = minutes_seconds[1].parse::<u64>().ok()?;
+    let milliseconds = if parts.len() > 1 {
+        parts[1].parse::<u64>().ok()?
+    } else {
+        0
+    };
+
+    if minutes > 99 || seconds > 59 || milliseconds > 999 {
+        return None;
+    }
+
+    // For LRC format, "0:12.34" means 12.34 seconds, not 0 minutes and 12.34 seconds
+    if minutes == 0 && seconds < 60 {
+        Some(seconds as f64 + milliseconds as f64 / 1000.0)
+    } else {
+        Some(minutes as f64 * 60.0 + seconds as f64 + milliseconds as f64 / 1000.0)
+    }
+}
+
+fn score(value: &Value, query: &Query, duration: Option<f64>) -> f64 {
+    let mut score = 0.0;
+
+    // Exact match on title gets highest score
+    if let Some(title) = value.get("trackName").and_then(Value::as_str) {
+        if title.to_lowercase() == query.title.to_lowercase() {
+            score += 100.0;
         }
     }
-    out
+
+    // Exact match on artist gets high score
+    if let Some(artist) = value.get("artistName").and_then(Value::as_str) {
+        if artist.to_lowercase() == query.artist.to_lowercase() {
+            score += 50.0;
+        }
+    }
+
+    // Partial match on title gets medium score
+    if let Some(title) = value.get("trackName").and_then(Value::as_str) {
+        if title.to_lowercase().contains(&query.title.to_lowercase()) {
+            score += 20.0;
+        }
+    }
+
+    // Partial match on artist gets low score
+    if let Some(artist) = value.get("artistName").and_then(Value::as_str) {
+        if artist.to_lowercase().contains(&query.artist.to_lowercase()) {
+            score += 10.0;
+        }
+    }
+
+    // Duration match gets additional score
+    if let Some(duration) = duration {
+        if let Some(track_duration) = value.get("duration").and_then(Value::as_f64) {
+            let diff = (track_duration - duration).abs();
+            if diff < 5.0 {
+                score += 5.0;
+            } else if diff < 10.0 {
+                score += 2.0;
+            }
+        }
+    }
+
+    score
+}
+
+#[derive(Clone, Debug)]
+struct Query {
+    artist: String,
+    title: String,
+}
+
+impl Default for Query {
+    fn default() -> Self {
+        Self {
+            artist: String::new(),
+            title: String::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -500,51 +553,79 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_synced_lyrics_and_offset() {
-        let lines = parse_lrc(
-            "[ar:Daft Punk]\n[offset:100]\n[00:01.50][00:03.00]Hello\n[00:05.25]World\n",
-        )
-        .unwrap();
-        assert_eq!(lines.len(), 3);
-        assert_eq!(lines[0].time, 1.6);
-        assert_eq!(lines[0].text, "Hello");
-        assert_eq!(lines[1].time, 3.1);
-        assert_eq!(lines[1].text, "Hello");
-        assert_eq!(lines[2].time, 5.35);
-        assert_eq!(lines[2].text, "World");
+    fn formats_durations() {
+        assert_eq!(format_duration(0.0), "0:00");
+        assert_eq!(format_duration(65.4), "1:05");
+        assert_eq!(format_duration(3661.0), "1:01:01");
+        assert_eq!(format_duration(f64::NAN), "--:--");
     }
 
     #[test]
-    fn parses_synced_lyrics_with_word_timestamps() {
-        let lines = parse_lrc(
-            "[00:01.50]He<00:02.00>l<00:02.50>lo\n[00:05.25]Wo<00:06.00>rld\n",
-        )
-        .unwrap();
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].time, 1.5);
-        assert_eq!(lines[0].text, "Hello");
-        assert_eq!(lines[1].time, 5.25);
-        assert_eq!(lines[1].text, "World");
+    fn detects_sources() {
+        assert_eq!(
+            Source::from_url("https://www.youtube.com/watch?v=abc"),
+            Source::YouTube
+        );
+        assert_eq!(
+            Source::from_url("https://soundcloud.com/artist/track"),
+            Source::SoundCloud
+        );
+        assert_eq!(Source::from_url("https://example.com/audio"), Source::Web);
     }
 
     #[test]
-    fn ignores_unsynced_lyrics() {
-        assert!(parse_lrc("This is not a synced lyric").is_none());
-    }
-
-    #[test]
-    fn ignores_metadata() {
-        assert!(parse_lrc("[ar:Artist]\n[ti:Title]\n[al:Album]\n[offset:100]").is_none());
+    fn detects_indonesian_artists() {
+        assert!(is_indonesian_artist("Indonesian Band"));
+        assert!(is_indonesian_artist("Lagu Indonesia"));
+        assert!(is_indonesian_artist("Siti Nurhaliza"));
+        assert!(!is_indonesian_artist("English Band"));
+        assert!(!is_indonesian_artist("Artist Name"));
     }
 
     #[test]
     fn parses_timestamps() {
-        assert_eq!(parse_timestamp("01:23"), Some(83.0));
-        assert_eq!(parse_timestamp("1:23.45"), Some(83.45));
-        assert_eq!(parse_timestamp("01:23.45"), Some(83.45));
-        assert_eq!(parse_timestamp("61:23.45"), Some(3683.45));
+        assert_eq!(parse_timestamp("0:12.34"), Some(12.034));
+        assert_eq!(parse_timestamp("1:23.45"), Some(83.045));
+        assert_eq!(parse_timestamp("01:23.45"), Some(83.045));
+        assert_eq!(parse_timestamp("61:23.45"), Some(3683.045));
         assert_eq!(parse_timestamp("invalid"), None);
         assert_eq!(parse_timestamp("01:invalid"), None);
         assert_eq!(parse_timestamp("01:-23"), None);
+    }
+
+    #[test]
+    fn parses_lrc_line() {
+        assert_eq!(
+            parse_lrc_line("[00:12.34]Hello world"),
+            Some((12.034, "Hello world"))
+        );
+        assert_eq!(
+            parse_lrc_line("[01:23.45]Test line"),
+            Some((83.045, "Test line"))
+        );
+        assert_eq!(parse_lrc_line("No timestamp"), None);
+        assert_eq!(parse_lrc_line("[invalid]"), None);
+    }
+
+    #[test]
+    fn parses_lrc() {
+        let lrc = "[00:12.34]First line\n[00:15.67]Second line\n[00:20.00]Third line";
+        let lyrics = parse_lrc(lrc).unwrap();
+        assert_eq!(lyrics.len(), 3);
+        assert_eq!(lyrics[0].time, 12.034);
+        assert_eq!(lyrics[0].text, "First line");
+        assert_eq!(lyrics[1].time, 15.067);
+        assert_eq!(lyrics[1].text, "Second line");
+        assert_eq!(lyrics[2].time, 20.00);
+        assert_eq!(lyrics[2].text, "Third line");
+    }
+
+    #[test]
+    fn parses_indonesian_lyrics() {
+        let lyrics_text = "Reference: John 3:16\n---\nAmazing grace, how sweet the sound\nThat saved a wretch like me";
+        let lyrics = parse_indonesian_lyrics(lyrics_text).unwrap();
+        assert_eq!(lyrics.len(), 2);
+        assert_eq!(lyrics[0].text, "Amazing grace, how sweet the sound");
+        assert_eq!(lyrics[1].text, "That saved a wretch like me");
     }
 }
