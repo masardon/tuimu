@@ -356,6 +356,8 @@ impl App {
             KeyCode::Right => self.seek(5.0),
             KeyCode::Char('?') => self.help = true,
             KeyCode::Char('#') => self.toggle_lyrics(),
+            KeyCode::Char('Q') => self.sort_by_quality(),
+            KeyCode::Char('T') => self.sort_by_duration(),
             _ => {}
         }
     }
@@ -391,6 +393,8 @@ impl App {
             KeyCode::Right => self.seek(5.0),
             KeyCode::Char('?') => self.help = true,
             KeyCode::Char('#') => self.toggle_lyrics(),
+            KeyCode::Char('Q') => self.sort_by_quality(),
+            KeyCode::Char('T') => self.sort_by_duration(),
             _ => {}
         }
     }
@@ -435,6 +439,7 @@ impl App {
             Ok(lookup) => {
                 let count = lookup.tracks.len();
                 self.results = lookup.tracks;
+                self.apply_quality_filter();
                 self.result_selected = 0;
                 let mut message = if count == 0 {
                     "No results.".to_string()
@@ -1043,5 +1048,17 @@ impl App {
 
     pub fn get_quality_filter(&self) -> QualityFilter {
         self.quality_filter
+    }
+
+    pub fn sort_by_quality(&mut self) {
+        self.results.sort_by(|a, b| b.quality_score().cmp(&a.quality_score()));
+        self.set_status("Results sorted by quality (highest first)".to_string(), false);
+    }
+
+    pub fn sort_by_duration(&mut self) {
+        self.results.sort_by(|a, b| {
+            a.duration.unwrap_or(0.0).total_cmp(&b.duration.unwrap_or(0.0))
+        });
+        self.set_status("Results sorted by duration".to_string(), false);
     }
 }
