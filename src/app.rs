@@ -95,6 +95,8 @@ pub struct App {
     pub lyrics: LyricsState,
     pub lyrics_enabled: bool,
     pub quality_filter: QualityFilter,
+    // Quality cache to avoid re-computing quality for the same tracks
+    quality_cache: HashMap<String, Quality>,
     prev_volume: f64,
     search_seq: u64,
     search_tx: Sender<SearchMessage>,
@@ -139,6 +141,7 @@ impl App {
             lyrics: LyricsState::default(),
             lyrics_enabled: true,
             quality_filter: QualityFilter::High, // Default to high quality
+            quality_cache: HashMap::new(),
             prev_volume: 70.0,
             search_seq: 0,
             search_tx,
@@ -1013,13 +1016,31 @@ impl App {
         let original_count = self.results.len();
         let before_filter = self.quality_filter;
         
-        self.results.retain(|track| match self.quality_filter {
-            QualityFilter::All => true,
-            QualityFilter::Lossless => track.quality == Quality::Lossless,
-            QualityFilter::High => track.quality >= Quality::High,
-            QualityFilter::Medium => track.quality >= Quality::Medium,
-            QualityFilter::Low => track.quality >= Quality::Low,
-        });
+        // Optimize for large result sets
+        if original_count > 1000 {
+            // For very large sets, use a more efficient approach
+            let filtered: Vec<Track> = self.results
+                .iter()
+                .filter(|track| match self.quality_filter {
+                    QualityFilter::All => true,
+                    QualityFilter::Lossless => track.quality == Quality::Lossless,
+                    QualityFilter::High => track.quality >= Quality::High,
+                    QualityFilter::Medium => track.quality >= Quality::Medium,
+                    QualityFilter::Low => track.quality >= Quality::Low,
+                })
+                .cloned()
+                .collect();
+            self.results = filtered;
+        } else {
+            // For smaller sets, use retain for better performance
+            self.results.retain(|track| match self.quality_filter {
+                QualityFilter::All => true,
+                QualityFilter::Lossless => track.quality == Quality::Lossless,
+                QualityFilter::High => track.quality >= Quality::High,
+                QualityFilter::Medium => track.quality >= Quality::Medium,
+                QualityFilter::Low => track.quality >= Quality::Low,
+            });
+        }
         
         if self.results.len() < original_count {
             let _filtered_count = original_count - self.results.len();
@@ -1035,13 +1056,15 @@ impl App {
                 false
             );
             
-            // Show detailed quality breakdown
-            let quality_breakdown = self.get_quality_breakdown();
-            if !quality_breakdown.is_empty() {
-                self.set_status(
-                    format!("Quality breakdown: {}", quality_breakdown),
-                    false
-                );
+            // Show detailed quality breakdown only for smaller sets
+            if original_count <= 100 {
+                let quality_breakdown = self.get_quality_breakdown();
+                if !quality_breakdown.is_empty() {
+                    self.set_status(
+                        format!("Quality breakdown: {}", quality_breakdown),
+                        false
+                    );
+                }
             }
             
             // Adjust selected index if it's out of bounds

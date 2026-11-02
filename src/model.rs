@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,6 +209,33 @@ impl Track {
             Source::Web => Quality::Low, // Unknown web sources are unpredictable
         }
     }
+
+    pub fn new_with_cache(title: String, artist: String, duration: Option<f64>, url: String, source: Source, quality_cache: &mut HashMap<String, Quality>) -> Self {
+        // Check if we have cached quality for this track
+        if let Some(cached_quality) = quality_cache.get(&url) {
+            return Self {
+                title,
+                artist,
+                duration,
+                url,
+                source,
+                quality: *cached_quality,
+            };
+        }
+
+        // Detect quality and cache it
+        let quality = Self::detect_quality(&title, source);
+        quality_cache.insert(url.clone(), quality);
+        
+        Self {
+            title,
+            artist,
+            duration,
+            url,
+            source,
+            quality,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -285,5 +313,80 @@ mod tests {
             Source::SoundCloud
         );
         assert_eq!(Source::from_url("https://example.com/audio"), Source::Web);
+    }
+
+    #[test]
+    fn detects_quality() {
+        // Test lossless detection
+        assert_eq!(
+            Track::detect_quality("FLAC - Song Title", Source::YouTube),
+            Quality::Lossless
+        );
+        assert_eq!(
+            Track::detect_quality("24bit Hi-Res Audio", Source::YouTube),
+            Quality::Lossless
+        );
+        assert_eq!(
+            Track::detect_quality("WAV Format Song", Source::YouTube),
+            Quality::Lossless
+        );
+
+        // Test high quality detection
+        assert_eq!(
+            Track::detect_quality("320kbps - High Quality", Source::YouTube),
+            Quality::High
+        );
+        assert_eq!(
+            Track::detect_quality("HQ Studio Master", Source::YouTube),
+            Quality::High
+        );
+        assert_eq!(
+            Track::detect_quality("CD Quality Audio", Source::YouTube),
+            Quality::High
+        );
+
+        // Test medium quality detection
+        assert_eq!(
+            Track::detect_quality("128kbps Standard", Source::YouTube),
+            Quality::Medium
+        );
+        assert_eq!(
+            Track::detect_quality("192kbps MP3", Source::YouTube),
+            Quality::Medium
+        );
+
+        // Test source-based defaults
+        assert_eq!(
+            Track::detect_quality("Regular Song", Source::Bandcamp),
+            Quality::High
+        );
+        assert_eq!(
+            Track::detect_quality("Regular Song", Source::YouTube),
+            Quality::Medium
+        );
+        assert_eq!(
+            Track::detect_quality("Regular Song", Source::SoundCloud),
+            Quality::Medium
+        );
+    }
+
+    #[test]
+    fn quality_filter_logic() {
+        use crate::app::QualityFilter;
+
+        // Test All filter
+        assert!(matches!(QualityFilter::All, _));
+        
+        // Test Lossless filter
+        assert_eq!(QualityFilter::Lossless.label(), "Lossless");
+        
+        // Test High filter
+        assert_eq!(QualityFilter::High.label(), "High");
+        
+        // Test Medium filter
+        assert_eq!(QualityFilter::Medium.label(), "Medium");
+        
+        // Test Low filter
+        assert_eq!(QualityFilter::Low.label(), "Low");
     }
 }

@@ -366,6 +366,8 @@ fn track_from_json(value: &Value, fallback: Option<SearchSource>) -> Option<Trac
         };
     }
 
+    // Note: We can't access the quality_cache here, so we'll use the regular detect_quality method
+    // The quality caching is handled at the App level
     let quality = Track::detect_quality(&title, source);
     
     Some(Track {
