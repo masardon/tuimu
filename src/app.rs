@@ -1160,6 +1160,61 @@ mod tests {
     }
 
     #[test]
+    fn toggle_lyrics_switches_panel_visibility() {
+        let mut app = test_app();
+        assert!(app.lyrics.visible);
+
+        app.focus = Focus::Results;
+        app.handle_key(key(KeyCode::Char('#')));
+        assert!(!app.lyrics.visible);
+
+        app.handle_key(key(KeyCode::F(3)));
+        assert!(app.lyrics.visible);
+    }
+
+    #[test]
+    fn toggle_lyrics_is_rejected_when_disabled() {
+        let mut app = App::with_player(Box::new(FakePlayer), false);
+        assert!(!app.lyrics.visible);
+        app.focus = Focus::Results;
+        app.handle_key(key(KeyCode::Char('#')));
+        assert!(!app.lyrics.visible);
+        assert!(app.status_is_error);
+    }
+
+    #[test]
+    fn lyrics_status_reflects_fetch_outcomes() {
+        use crate::lyrics::LyricLine;
+
+        let mut state = LyricsState::default();
+        assert_eq!(state.status(), LyricsStatus::Idle);
+
+        state.loading = true;
+        assert_eq!(state.status(), LyricsStatus::Loading);
+
+        state.loading = false;
+        state.error = Some("network down".into());
+        assert_eq!(state.status(), LyricsStatus::Unavailable);
+        state.error = None;
+
+        state.lines = Some(Lyrics::default());
+        assert_eq!(state.status(), LyricsStatus::Unavailable);
+
+        state.instrumental = true;
+        assert_eq!(state.status(), LyricsStatus::Instrumental);
+        state.instrumental = false;
+
+        state.lines = Some(Lyrics {
+            synced: Some(vec![LyricLine {
+                time: 0.0,
+                text: "la".into(),
+            }]),
+            ..Lyrics::default()
+        });
+        assert_eq!(state.status(), LyricsStatus::Ready);
+    }
+
+    #[test]
     fn quality_filter_narrows_view_without_dropping_results() {
         let mut app = test_app();
         app.all_results = vec![
