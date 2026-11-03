@@ -1171,6 +1171,17 @@ impl App {
         };
     }
 
+    /// Queue `tracks` and start playing the first one (used by the
+    /// `--playlist` startup flag).
+    pub fn start_with_tracks(&mut self, tracks: Vec<Track>) {
+        if tracks.is_empty() {
+            return;
+        }
+        self.queue = tracks;
+        self.queue_selected = 0;
+        self.play_queue_index(0);
+    }
+
     fn handle_playlist_key(&mut self, key: KeyEvent) {
         if matches!(self.playlist_ui, PlaylistUi::NamePrompt { .. }) {
             self.handle_playlist_name_key(key);
@@ -1862,6 +1873,17 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn start_with_tracks_queues_and_plays() {
+        let mut app = test_app();
+        app.start_with_tracks(vec![track(Quality::High), track(Quality::Low)]);
+        assert_eq!(app.queue.len(), 2);
+        assert_eq!(app.current, Some(0));
+
+        app.start_with_tracks(Vec::new());
+        assert_eq!(app.queue.len(), 2);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::io::{self, Stdout};
 use std::panic;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event};
@@ -44,10 +44,27 @@ fn run() -> Result<()> {
     ytdlp::check_dependencies()?;
     let mpv = Mpv::spawn().context("could not start the mpv playback engine")?;
 
+    // Resolve the startup playlist before the TUI takes over the terminal so
+    // a bad name produces a plain error message.
+    let startup_playlist = match &args.playlist {
+        Some(name) => {
+            let dir =
+                playlist::playlists_dir().context("could not resolve the playlists directory")?;
+            match playlist::load(&dir, name)? {
+                Some(playlist) if !playlist.tracks.is_empty() => Some(playlist.tracks),
+                _ => bail!("playlist \"{name}\" was not found or is empty"),
+            }
+        }
+        None => None,
+    };
+
     let mut terminal = init_terminal().context("could not initialize the terminal")?;
     install_panic_hook();
 
     let mut app = App::new(mpv, !args.no_lyrics);
+    if let Some(tracks) = startup_playlist {
+        app.start_with_tracks(tracks);
+    }
     let result = event_loop(&mut terminal, &mut app);
     let restore_result = restore_terminal(&mut terminal);
 
@@ -131,4 +148,7 @@ fn install_panic_hook() {
 struct Args {
     #[arg(short, long, help = "Disable lyrics fetching")]
     no_lyrics: bool,
+
+    #[arg(short, long, value_name = "NAME", help = "Start with a saved playlist")]
+    playlist: Option<String>,
 }
