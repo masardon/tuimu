@@ -1863,4 +1863,34 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn playlist_popups_render_without_panicking() {
+        let (mut app, _dir) = test_app_with_playlist_dir("render");
+        playlist::save(&app.playlist_dir, "mix", &[track(Quality::High)]).expect("save");
+        app.focus = Focus::Queue;
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).expect("terminal");
+
+        app.handle_key(key(KeyCode::Char('o')));
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &app))
+            .expect("draw picker");
+
+        app.handle_key(key(KeyCode::Char('e')));
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &app))
+            .expect("draw tracks");
+
+        app.handle_key(key(KeyCode::Esc));
+        app.queue = vec![track(Quality::High)];
+        app.handle_key(key(KeyCode::Char('S')));
+        for ch in "My Mix".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &app))
+            .expect("draw name prompt");
+    }
 }

@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table, TableState, Wrap},
 };
 
-use crate::app::{App, Focus, LyricsStatus};
+use crate::app::{App, Focus, LyricsStatus, NameAction, PickerLevel, PickerMode, PlaylistUi};
 use crate::model::{Quality, RepeatMode, Source, Track, format_duration, truncate};
 
 const ACCENT: Color = Color::Rgb(190, 150, 255);
@@ -54,6 +54,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.help {
         draw_help(frame, area);
     }
+    draw_playlist_popup(frame, app, area);
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -460,6 +461,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("f", "filter"),
             ("@", "source"),
             ("#", "lyrics"),
+            ("S", "save playlist"),
+            ("s", "add to playlist"),
+            ("o", "playlists"),
             ("?", "help"),
             ("q", "quit"),
         ],
@@ -472,6 +476,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("r", "repeat"),
             ("f", "filter"),
             ("#", "lyrics"),
+            ("S", "save playlist"),
+            ("o", "playlists"),
             ("?", "help"),
             ("q", "quit"),
         ],
@@ -623,6 +629,225 @@ fn lyrics_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
     content
 }
 
+fn draw_playlist_popup(frame: &mut Frame, app: &App, area: Rect) {
+    match &app.playlist_ui {
+        PlaylistUi::None => {}
+        PlaylistUi::NamePrompt { action, input } => {
+            draw_playlist_name_prompt(frame, area, action, input);
+        }
+        PlaylistUi::Picker {
+            mode,
+            level,
+            selected,
+            names,
+        } => draw_playlist_picker(frame, area, mode, level, *selected, names),
+    }
+}
+
+fn popup_area(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width.saturating_sub(2));
+    let height = height.min(area.height.saturating_sub(2));
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
+}
+
+fn draw_playlist_name_prompt(
+    frame: &mut Frame,
+    area: Rect,
+    action: &NameAction,
+    input: &crate::input::TextInput,
+) {
+    let (title, confirm_label) = match action {
+        NameAction::SaveQueue => (" Save queue as playlist ", "Enter save · Esc cancel"),
+        NameAction::Rename { .. } => (" Rename playlist ", "Enter rename · Esc cancel"),
+    };
+
+    let popup = popup_area(area, 52, 6);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(title, Style::default().fg(ACCENT).bold()))
+        .style(Style::default().bg(Color::Rgb(17, 17, 24)));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    if inner.height < 2 {
+        return;
+    }
+
+    let value = input.value();
+    let cursor = input.cursor();
+    let text = if value.is_empty() {
+        Span::styled("Type a name…", Style::default().fg(MUTED).italic())
+    } else {
+        Span::raw(value.clone())
+    };
+    // Keep the cursor visible for long names by windowing from the left.
+    let visible_width = inner.width.saturating_sub(3) as usize;
+    let start = cursor.saturating_sub(visible_width.saturating_sub(1));
+    let shown: String = value.chars().skip(start).take(visible_width).collect();
+    let text = if value.is_empty() {
+        text
+    } else {
+        Span::raw(shown)
+    };
+
+    let input_area = Rect { height: 1, ..inner };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("› ", Style::default().fg(ACCENT).bold()),
+            text,
+        ])),
+        input_area,
+    );
+    let cursor_x = inner
+        .x
+        .saturating_add(2)
+        .saturating_add((cursor.saturating_sub(start)) as u16)
+        .min(inner.right().saturating_sub(1));
+    frame.set_cursor_position((cursor_x, inner.y));
+
+    let hint_area = Rect {
+        y: inner.y + 1,
+        height: 1,
+        ..inner
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(confirm_label, Style::default().fg(MUTED))),
+        hint_area,
+    );
+}
+
+fn draw_playlist_picker(
+    frame: &mut Frame,
+    area: Rect,
+    mode: &PickerMode,
+    level: &PickerLevel,
+    selected: usize,
+    names: &[String],
+) {
+    let title = match mode {
+        PickerMode::Open => " Playlists ",
+        PickerMode::AddTo { .. } => " Add to playlist ",
+    };
+    let hints = match (mode, level) {
+        (_, PickerLevel::Tracks { .. }) => "Enter play · d remove · Esc back",
+        (PickerMode::AddTo { .. }, PickerLevel::Playlists) => "Enter add track · Esc cancel",
+        (PickerMode::Open, PickerLevel::Playlists) => {
+            "Enter load · a append · e tracks · d delete · r rename · Esc close"
+        }
+    };
+
+    let popup = popup_area(area, 60, 20);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(title, Style::default().fg(ACCENT).bold()))
+        .style(Style::default().bg(Color::Rgb(17, 17, 24)));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    if inner.height < 2 {
+        return;
+    }
+
+    let rows_area = Rect {
+        height: inner.height.saturating_sub(1),
+        ..inner
+    };
+    let hint_area = Rect {
+        y: inner.y + inner.height.saturating_sub(1),
+        height: 1,
+        ..inner
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(hints, Style::default().fg(MUTED))),
+        hint_area,
+    );
+
+    let visible = rows_area.height as usize;
+    let content: Vec<Line> = match level {
+        PickerLevel::Playlists => {
+            if names.is_empty() {
+                hint_lines(match mode {
+                    PickerMode::Open => "No playlists yet. Press S in the queue view to save one.",
+                    PickerMode::AddTo { .. } => {
+                        "No playlists yet. Save one first with S from the queue view."
+                    }
+                })
+            } else {
+                let start = window_start(selected, visible, names.len());
+                names[start..start + visible.min(names.len() - start)]
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, name)| {
+                        selectable_row(offset + start == selected, name.clone(), None)
+                    })
+                    .collect()
+            }
+        }
+        PickerLevel::Tracks { tracks, .. } => {
+            if tracks.is_empty() {
+                hint_lines("This playlist is empty.")
+            } else {
+                let start = window_start(selected, visible, tracks.len());
+                tracks[start..start + visible.min(tracks.len() - start)]
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, track)| {
+                        selectable_row(
+                            offset + start == selected,
+                            truncate(&track.title, 36),
+                            Some(truncate(&track.artist, 18)),
+                        )
+                    })
+                    .collect()
+            }
+        }
+    };
+
+    frame.render_widget(Paragraph::new(content).wrap(Wrap { trim: true }), rows_area);
+}
+
+fn window_start(selected: usize, visible: usize, total: usize) -> usize {
+    if total <= visible {
+        0
+    } else {
+        selected.saturating_sub(visible / 2).min(total - visible)
+    }
+}
+
+fn selectable_row(is_selected: bool, title: String, artist: Option<String>) -> Line<'static> {
+    let mut spans = Vec::new();
+    if is_selected {
+        spans.push(Span::styled("▶ ", Style::default().fg(GREEN).bold()));
+        spans.push(Span::styled(
+            title,
+            Style::default().fg(Color::White).bold(),
+        ));
+        if let Some(artist) = artist {
+            spans.push(Span::styled(
+                format!(" — {artist}"),
+                Style::default().fg(MUTED),
+            ));
+        }
+    } else {
+        spans.push(Span::styled("  ", Style::default()));
+        spans.push(Span::styled(title, Style::default().fg(MUTED)));
+        if let Some(artist) = artist {
+            spans.push(Span::styled(
+                format!(" — {artist}"),
+                Style::default().fg(Color::Rgb(100, 100, 115)),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
 fn draw_help(frame: &mut Frame, area: Rect) {
     let width = area.width.saturating_sub(4).min(100);
     let height = area.height.saturating_sub(2).min(26);
@@ -683,6 +908,14 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_line("f", "cycle quality filter"),
         help_line("W", "toggle high quality only"),
         help_line("Q / T", "sort by quality / duration"),
+        Line::from(Span::raw("")),
+        section("PLAYLISTS"),
+        help_line("S", "save queue as playlist"),
+        help_line("s", "add result to playlist"),
+        help_line("o", "open playlist picker"),
+        help_line("Enter/a", "load / append playlist"),
+        help_line("e", "browse playlist tracks"),
+        help_line("d / r", "delete / rename playlist"),
         Line::from(Span::raw("")),
         section("LYRICS"),
         help_line("# / F3", "show/hide lyrics panel"),
