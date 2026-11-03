@@ -513,6 +513,7 @@ impl App {
             KeyCode::Char('T') => self.sort_by_duration(),
             KeyCode::Char('W') => self.toggle_high_quality_only(),
             KeyCode::Char('S') => self.open_save_playlist_prompt(),
+            KeyCode::Char('s') => self.open_add_queue_item_to_playlist(),
             KeyCode::Char('o') => self.open_playlist_picker(),
             KeyCode::Char('v') => self.toggle_visualizer(),
             _ => {}
@@ -1217,6 +1218,19 @@ impl App {
             self.set_status("No track selected.", true);
             return;
         };
+        self.open_add_to_playlist_with(track);
+    }
+
+    /// `s` (queue view): pick a playlist to add the selected queue item to.
+    pub fn open_add_queue_item_to_playlist(&mut self) {
+        let Some(track) = self.queue.get(self.queue_selected).cloned() else {
+            self.set_status("Queue is empty.", true);
+            return;
+        };
+        self.open_add_to_playlist_with(track);
+    }
+
+    fn open_add_to_playlist_with(&mut self, track: Track) {
         let names = playlist::list(&self.playlist_dir);
         self.playlist_ui = PlaylistUi::Picker {
             mode: PickerMode::AddTo { track },
@@ -1820,6 +1834,36 @@ mod tests {
         assert!(!app.status_is_error);
         let saved = playlist::load(&dir, "favs").expect("load").expect("saved");
         assert_eq!(saved.tracks.len(), 1);
+    }
+
+    #[test]
+    fn s_from_queue_adds_selected_item_to_playlist() {
+        let (mut app, dir) = test_app_with_playlist_dir("queue-add");
+        playlist::save(&dir, "favs", &[track(Quality::High)]).expect("save");
+        app.queue = vec![track(Quality::High), track(Quality::Low)];
+        app.queue_selected = 1; // cursor on the second track
+
+        app.focus = Focus::Queue;
+        app.handle_key(key(KeyCode::Char('s')));
+        assert!(matches!(
+            &app.playlist_ui,
+            PlaylistUi::Picker { mode: PickerMode::AddTo { .. }, names, .. } if names.len() == 1
+        ));
+
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(app.playlist_ui, PlaylistUi::None));
+        assert!(!app.status_is_error);
+        let saved = playlist::load(&dir, "favs").expect("load").expect("saved");
+        assert_eq!(saved.tracks.len(), 2);
+    }
+
+    #[test]
+    fn s_from_empty_queue_shows_error() {
+        let (mut app, _dir) = test_app_with_playlist_dir("queue-empty");
+        app.focus = Focus::Queue;
+        app.handle_key(key(KeyCode::Char('s')));
+        assert!(matches!(app.playlist_ui, PlaylistUi::None));
+        assert!(app.status_is_error);
     }
 
     #[test]

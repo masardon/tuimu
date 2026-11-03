@@ -82,7 +82,7 @@ Or run in development: `cargo run`
 | **@** | Switch between YouTube and SoundCloud |
 | **#** / **F3** | Show/hide the lyrics panel |
 | **S** | Save the current queue as a playlist |
-| **s** | Add the selected result to a playlist |
+| **s** | Add the selected result or queue item to a playlist |
 | **o** | Browse saved playlists |
 | **v** | Show/hide the visualizer |
 | **Enter** | Play selected track / Start search |
@@ -152,7 +152,7 @@ While the search box is focused, printable keys (including `q`, `@`, `#`, and `?
 
 ### Playlists
 - Build a queue, then press `S` and type a name to save it
-- Press `s` on a search result to add that track to a saved playlist
+- Press `s` on a search result or queue item to add that track to a saved playlist
 - Press `o` to browse saved playlists: `Enter` loads and plays one, `a` appends it to the current queue, `e` inspects its tracks (`d` removes a track), `d` deletes, `r` renames
 - Start directly with one: `tuimu --playlist "name"`
 - Playlists are stored as JSON under `~/.local/share/tuimu/playlists/` (or `$XDG_DATA_HOME/tuimu/playlists/`) and keep each track's source URL, so they work across sessions
