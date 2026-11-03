@@ -11,6 +11,7 @@ use crate::lyrics::{self, Lyrics};
 use crate::model::{QualityFilter, RepeatMode, SearchSource, Track};
 use crate::mpv::{Mpv, MpvMessage, Player};
 use crate::playlist::{self, Playlist};
+use crate::visualizer::{BANDS, Visualizer, VisualizerStatus, smooth};
 use crate::ytdlp::{self, Lookup, StreamInfo};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,6 +179,10 @@ pub struct App {
     pub lyrics_enabled: bool,
     pub playlist_ui: PlaylistUi,
     pub playlist_dir: PathBuf,
+    pub viz_enabled: bool,
+    pub viz_visible: bool,
+    viz: Visualizer,
+    viz_bars: Vec<f32>,
     pub quality_filter: QualityFilter,
     prev_volume: f64,
     search_seq: u64,
@@ -195,11 +200,11 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(mpv: Mpv, lyrics_enabled: bool) -> Self {
-        Self::with_player(Box::new(mpv), lyrics_enabled)
+    pub fn new(mpv: Mpv, lyrics_enabled: bool, viz_enabled: bool) -> Self {
+        Self::with_player(Box::new(mpv), lyrics_enabled, viz_enabled)
     }
 
-    fn with_player(mpv: Box<dyn Player>, lyrics_enabled: bool) -> Self {
+    fn with_player(mpv: Box<dyn Player>, lyrics_enabled: bool, viz_enabled: bool) -> Self {
         let (search_tx, search_rx) = mpsc::channel();
         let (play_tx, play_rx) = mpsc::channel();
         let (lyrics_tx, lyrics_rx) = mpsc::channel();
@@ -232,6 +237,10 @@ impl App {
             lyrics_enabled,
             playlist_ui: PlaylistUi::None,
             playlist_dir: playlist::playlists_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            viz_enabled,
+            viz_visible: viz_enabled,
+            viz: Visualizer::default(),
+            viz_bars: vec![0.0; BANDS],
             quality_filter: QualityFilter::All,
             prev_volume: 70.0,
             search_seq: 0,
@@ -306,6 +315,50 @@ impl App {
 
     pub fn on_tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
+        self.tick_visualizer();
+    }
+
+    /// Current capture state of the visualizer.
+    pub fn viz_status(&self) -> VisualizerStatus {
+        self.viz.status()
+    }
+
+    /// Latest smoothed band levels (0..1), always `BANDS` long.
+    pub fn viz_bars(&self) -> &[f32] {
+        &self.viz_bars
+    }
+
+    /// `v`: show or hide the visualizer panel.
+    pub fn toggle_visualizer(&mut self) {
+        if !self.viz_enabled {
+            self.set_status("Visualizer is disabled by --no-visualizer.", true);
+            return;
+        }
+        self.viz_visible = !self.viz_visible;
+    }
+
+    fn tick_visualizer(&mut self) {
+        // Capture runs only while the panel is shown; re-showing retries a
+        // previously failed start, so installing PulseAudio mid-session works.
+        if self.viz_enabled && self.viz_visible {
+            if self.viz.status() == VisualizerStatus::Stopped {
+                self.viz.start();
+            }
+        } else if self.viz.status() != VisualizerStatus::Stopped {
+            self.viz.stop();
+        }
+
+        match self.viz.poll() {
+            Some(bands) => self.viz_bars = smooth(&self.viz_bars, &bands),
+            // No frame this tick: keep decaying so bars fall instead of
+            // freezing (covers pauses and silent monitors).
+            None => {
+                if self.viz.status() == VisualizerStatus::Running {
+                    let silent = vec![0.0; BANDS];
+                    self.viz_bars = smooth(&self.viz_bars, &silent);
+                }
+            }
+        }
     }
 
     pub fn handle_paste(&mut self, text: &str) {
@@ -418,6 +471,7 @@ impl App {
             KeyCode::Char('S') => self.open_save_playlist_prompt(),
             KeyCode::Char('s') => self.open_add_to_playlist(),
             KeyCode::Char('o') => self.open_playlist_picker(),
+            KeyCode::Char('v') => self.toggle_visualizer(),
             _ => {}
         }
     }
@@ -460,6 +514,7 @@ impl App {
             KeyCode::Char('W') => self.toggle_high_quality_only(),
             KeyCode::Char('S') => self.open_save_playlist_prompt(),
             KeyCode::Char('o') => self.open_playlist_picker(),
+            KeyCode::Char('v') => self.toggle_visualizer(),
             _ => {}
         }
     }
@@ -1548,7 +1603,7 @@ mod tests {
     }
 
     fn test_app() -> App {
-        App::with_player(Box::new(FakePlayer), true)
+        App::with_player(Box::new(FakePlayer), true, false)
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1622,7 +1677,7 @@ mod tests {
 
     #[test]
     fn toggle_lyrics_is_rejected_when_disabled() {
-        let mut app = App::with_player(Box::new(FakePlayer), false);
+        let mut app = App::with_player(Box::new(FakePlayer), false, false);
         assert!(!app.lyrics.visible);
         app.focus = Focus::Results;
         app.handle_key(key(KeyCode::Char('#')));
@@ -1884,6 +1939,54 @@ mod tests {
 
         app.start_with_tracks(Vec::new());
         assert_eq!(app.queue.len(), 2);
+    }
+
+    #[test]
+    fn v_toggles_visualizer_panel() {
+        let mut app = App::with_player(Box::new(FakePlayer), true, true);
+        assert!(app.viz_visible);
+
+        app.focus = Focus::Results;
+        app.handle_key(key(KeyCode::Char('v')));
+        assert!(!app.viz_visible);
+
+        app.handle_key(key(KeyCode::Char('v')));
+        assert!(app.viz_visible);
+    }
+
+    #[test]
+    fn v_reports_disabled_visualizer() {
+        let mut app = test_app(); // viz disabled
+        app.focus = Focus::Results;
+        app.handle_key(key(KeyCode::Char('v')));
+        assert!(!app.viz_visible);
+        assert!(app.status_is_error);
+    }
+
+    #[test]
+    fn visualizer_bars_render_without_panicking() {
+        let mut app = App::with_player(Box::new(FakePlayer), true, true);
+        app.viz_bars = (0..BANDS)
+            .map(|i| (i as f32 + 2.0) / (BANDS as f32 + 2.0))
+            .collect();
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &app))
+            .expect("draw with both panels");
+
+        // Lyrics hidden: visualizer takes the full right column.
+        app.lyrics.visible = false;
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &app))
+            .expect("draw viz only");
+
+        // Tiny terminal must not panic either.
+        let mut tiny =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).expect("terminal");
+        tiny.draw(|frame| crate::ui::draw(frame, &app))
+            .expect("draw tiny");
     }
 
     #[test]

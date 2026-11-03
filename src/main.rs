@@ -62,7 +62,7 @@ fn run() -> Result<()> {
     let mut terminal = init_terminal().context("could not initialize the terminal")?;
     install_panic_hook();
 
-    let mut app = App::new(mpv, !args.no_lyrics);
+    let mut app = App::new(mpv, !args.no_lyrics, true);
     if let Some(tracks) = startup_playlist {
         app.start_with_tracks(tracks);
     }

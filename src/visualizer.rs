@@ -6,8 +6,6 @@
 //! only dependency-free tap. The monitor carries all desktop audio, not
 //! just tuimu's own playback.
 
-#![allow(dead_code)] // wired into the UI in the next commit
-
 use std::env;
 use std::io::Read;
 use std::process::{Child, Command, Stdio};

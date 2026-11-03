@@ -8,6 +8,7 @@ use ratatui::{
 
 use crate::app::{App, Focus, LyricsStatus, NameAction, PickerLevel, PickerMode, PlaylistUi};
 use crate::model::{Quality, RepeatMode, Source, Track, format_duration, truncate};
+use crate::visualizer::{BANDS, VisualizerStatus};
 
 const ACCENT: Color = Color::Rgb(190, 150, 255);
 const ACCENT_DIM: Color = Color::Rgb(105, 85, 140);
@@ -32,9 +33,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_header(frame, app, chunks[0]);
 
     // Left column: search stacked over queue, each exactly half. The right
-    // half is the lyrics panel, which can be toggled with `#` / F3.
+    // half holds the lyrics panel (`#` / F3) over the visualizer (`v`).
     let show_lyrics = app.lyrics_enabled && app.lyrics.visible;
-    let columns = if show_lyrics {
+    let show_viz = app.viz_enabled && app.viz_visible;
+    let columns = if show_lyrics || show_viz {
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(chunks[1])
     } else {
@@ -44,8 +46,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .split(columns[0]);
     draw_search(frame, app, main[0]);
     draw_queue(frame, app, main[1]);
-    if show_lyrics {
+    if show_lyrics && show_viz {
+        // Lyrics get three quarters, the visualizer the bottom quarter.
+        let right = Layout::vertical([Constraint::Percentage(75), Constraint::Percentage(25)])
+            .split(columns[1]);
+        draw_lyrics_panel(frame, app, right[0]);
+        draw_visualizer(frame, app, right[1]);
+    } else if show_lyrics {
         draw_lyrics_panel(frame, app, columns[1]);
+    } else if show_viz {
+        draw_visualizer(frame, app, columns[1]);
     }
     draw_now_playing(frame, app, chunks[2]);
     draw_status(frame, app, chunks[3]);
@@ -464,6 +474,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("S", "save playlist"),
             ("s", "add to playlist"),
             ("o", "playlists"),
+            ("v", "visualizer"),
             ("?", "help"),
             ("q", "quit"),
         ],
@@ -478,6 +489,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("#", "lyrics"),
             ("S", "save playlist"),
             ("o", "playlists"),
+            ("v", "visualizer"),
             ("?", "help"),
             ("q", "quit"),
         ],
@@ -627,6 +639,82 @@ fn lyrics_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
     }
 
     content
+}
+
+const BAR_CHARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+fn draw_visualizer(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style(false))
+        .title(Span::styled(
+            " Visualizer ",
+            Style::default().fg(ACCENT).bold(),
+        ))
+        .style(Style::default().bg(PANEL_BG));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    if app.viz_status() == VisualizerStatus::Unavailable {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " Needs PulseAudio / PipeWire (parec)",
+                Style::default().fg(MUTED).italic(),
+            )),
+            inner,
+        );
+        return;
+    }
+
+    // One bar per column; with fewer columns than bands, sample the bands.
+    let columns = inner.width as usize;
+    let height = inner.height as usize;
+    let mut rows: Vec<Vec<(char, Color)>> = vec![Vec::with_capacity(columns); height];
+    for column in 0..columns {
+        let band = column * BANDS / columns.max(1);
+        let level = app.viz_bars().get(band).copied().unwrap_or(0.0);
+        let total_eighths = (level * height as f32 * 8.0).round() as usize;
+        let full = total_eighths / 8;
+        let remainder = total_eighths % 8;
+
+        let color = band_gradient(band);
+        for (row, cells) in rows.iter_mut().enumerate().take(height) {
+            let glyph = if row < full {
+                '█'
+            } else if row == full && remainder > 0 {
+                BAR_CHARS[remainder - 1]
+            } else {
+                ' '
+            };
+            cells.push((glyph, color));
+        }
+    }
+
+    // Render bottom-up so bars grow from the panel floor.
+    let lines: Vec<Line> = rows
+        .iter()
+        .rev()
+        .map(|row| {
+            Line::from(
+                row.iter()
+                    .map(|(glyph, color)| {
+                        Span::styled(glyph.to_string(), Style::default().fg(*color))
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Gradient from accent (bass) to green (treble) across the band range.
+fn band_gradient(band: usize) -> Color {
+    let t = (band as f32 / (BANDS - 1) as f32).clamp(0.0, 1.0);
+    let channel = |a: u16, b: u16| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    Color::Rgb(channel(190, 120), channel(150, 220), channel(255, 160))
 }
 
 fn draw_playlist_popup(frame: &mut Frame, app: &App, area: Rect) {
@@ -917,9 +1005,10 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_line("e", "browse playlist tracks"),
         help_line("d / r", "delete / rename playlist"),
         Line::from(Span::raw("")),
-        section("LYRICS"),
+        section("PANELS"),
         help_line("# / F3", "show/hide lyrics panel"),
-        help_line("Auto", "follows the current track"),
+        help_line("v", "show/hide visualizer"),
+        help_line("Auto", "lyrics follow the current track"),
         Line::from(Span::raw("")),
         section("SOURCES"),
         help_line("Search", "YouTube, SoundCloud"),
