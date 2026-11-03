@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# Tuimu Installation Script for Linux
+# TuiMu Installation Script for Linux
 # Installs a pre-built release binary without requiring Cargo.
 
 set -e
 
-echo "=== Tuimu Installation Script ==="
+echo "=== TuiMu Installation Script ==="
 
 if [ "$EUID" -eq 0 ]; then
     echo "Please do not run this script as root"
@@ -40,7 +40,7 @@ TEMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TEMP_DIR"' EXIT
 cd "$TEMP_DIR"
 
-echo "Downloading tuimu for $ARCH..."
+echo "Downloading TuiMu for $ARCH..."
 if ! curl -fL -o tuimu.tar.gz "$DOWNLOAD_URL"; then
     echo "Error: Could not download $DOWNLOAD_URL"
     echo "Check https://github.com/masardon/tuimu/releases for an available build."
@@ -60,13 +60,13 @@ echo "Installing to /usr/local/bin..."
 sudo install -m 0755 "$BINARY" /usr/local/bin/tuimu
 
 echo "=== Installation complete ==="
-echo "tuimu has been installed to /usr/local/bin/tuimu"
+echo "TuiMu has been installed to /usr/local/bin/tuimu"
 echo ""
 
 MISSING=0
 for dep in yt-dlp mpv curl; do
     if ! command -v "$dep" &> /dev/null; then
-        echo "Warning: '$dep' was not found in PATH; tuimu needs it at runtime."
+        echo "Warning: '$dep' was not found in PATH; TuiMu needs it at runtime."
         MISSING=1
     fi
 done

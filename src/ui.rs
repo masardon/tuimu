@@ -76,7 +76,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 
     let line = Line::from(vec![
         Span::styled(
-            " ♫ tuimu ",
+            " ♫ TuiMu ",
             Style::default().fg(Color::Black).bg(ACCENT).bold(),
         ),
         Span::raw("  free music from the terminal "),

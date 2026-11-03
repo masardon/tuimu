@@ -4,7 +4,7 @@
 //!
 //! mpv's IPC does not expose PCM data, so the system sink monitor is the
 //! only dependency-free tap. The monitor carries all desktop audio, not
-//! just tuimu's own playback.
+//! just TuiMu's own playback.
 
 use std::env;
 use std::io::Read;

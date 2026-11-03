@@ -7,7 +7,7 @@ use serde_json::Value;
 use crate::ytdlp::curl_bin;
 
 const API_ROOT: &str = "https://lrclib.net/api";
-const USER_AGENT: &str = "tuimu/0.1.0 (terminal music player)";
+const USER_AGENT: &str = "TuiMu/0.1.0 (terminal music player)";
 const MAX_RETRIES: usize = 2;
 const RETRY_DELAY: Duration = Duration::from_millis(500);
 

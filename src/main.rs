@@ -18,7 +18,7 @@ use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -30,7 +30,7 @@ type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("tuimu: {error:#}");
+        eprintln!("TuiMu: {error:#}");
         std::process::exit(1);
     }
 }
@@ -39,10 +39,10 @@ fn run() -> Result<()> {
     let args = Args::parse();
 
     if args.no_lyrics {
-        println!("tuimu: Lyrics fetching disabled");
+        println!("TuiMu: Lyrics fetching disabled");
     }
     if args.no_visualizer {
-        println!("tuimu: Visualizer disabled");
+        println!("TuiMu: Visualizer disabled");
     }
 
     ytdlp::check_dependencies()?;
@@ -102,8 +102,14 @@ fn init_terminal() -> Result<Tui> {
     enable_raw_mode().context("could not enable raw mode")?;
     let mut stdout = io::stdout();
 
-    // Set terminal to handle all keys including F keys
-    if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, Hide) {
+    // Set terminal to handle all keys including F keys and set the window title
+    if let Err(error) = execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        Hide,
+        SetTitle("TuiMu")
+    ) {
         let _ = disable_raw_mode();
         return Err(error).context("could not enter the alternate screen");
     }

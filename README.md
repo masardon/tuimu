@@ -1,4 +1,4 @@
-# tuimu
+# ♫ TuiMu
 
 A fast, free terminal music player. Search YouTube and SoundCloud, paste any URL that [yt-dlp](https://github.com/yt-dlp/yt-dlp) supports, queue tracks, and play them with [mpv](https://mpv.io/).
 
@@ -10,7 +10,7 @@ No accounts, no logins, no paid APIs.
 
 ## Sneak Peek
 
-![tuimu terminal music player](images/tuimu.png)
+![TuiMu terminal music player](images/tuimu.png)
 
 ## Requirements
 
@@ -187,7 +187,7 @@ While the search box is focused, printable keys (including `q`, `@`, `#`, and `?
 - Without a pulse server the panel shows a note instead of bars; disable it entirely with `--no-visualizer`
 
 ### Spotify Integration
-Paste a single Spotify track URL - `tuimu` pulls the title from Spotify's public oEmbed and matches it to a free YouTube stream (Spotify playback requires login).
+Paste a single Spotify track URL - TuiMu pulls the title from Spotify's public oEmbed and matches it to a free YouTube stream (Spotify playback requires login).
 
 ### URL Support
 - Directly paste any URL that yt-dlp supports
@@ -226,13 +226,13 @@ Runs the test suite, builds a release binary, and packages it as
 
 ## Cache Management
 
-`tuimu` does not keep its own application cache. To start a build from scratch,
+TuiMu does not keep its own application cache. To start a build from scratch,
 run `cargo clean` (or `./clean-cache.sh`); deleting global Cargo or media-player
 caches is not required.
 
 ## Notes
 
-- SoundCloud tracks without a full download are often 30-second previews when unauthenticated. This is a SoundCloud limitation, not a `tuimu` bug.
+- SoundCloud tracks without a full download are often 30-second previews when unauthenticated. This is a SoundCloud limitation, not a TuiMu bug.
 - The quality shown next to each track is an estimate based on title tags and source metadata, not a measurement of the actual stream.
 - YouTube stream extraction uses yt-dlp's Android player client for reliability; the app relaunches mpv per source to send the required `Referer` headers without breaking playback.
 - All audio extraction goes through yt-dlp and is passed to mpv as a direct URL - no browser session or cookies are used.

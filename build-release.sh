@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# Build tuimu for release and package the binary with documentation.
+# Build TuiMu for release and package the binary with documentation.
 
 set -e
 
-echo "=== Tuimu Build Script ==="
+echo "=== TuiMu Build Script ==="
 
 VERSION=$(grep "^version" Cargo.toml | cut -d '"' -f 2)
 echo "Building version: $VERSION"
@@ -26,7 +26,7 @@ echo "Building for release..."
 cargo build --release
 
 cat > release_notes.md << EOF
-tuimu v$VERSION
+TuiMu v$VERSION
 
 A fast, free terminal music player.
 
@@ -59,4 +59,4 @@ echo "=== Build complete ==="
 echo "Release package created: $ARCHIVE"
 echo ""
 echo "To submit to GitHub releases:"
-echo "  gh release create v$VERSION \"$ARCHIVE\" --title \"tuimu v$VERSION\" --notes-file release_notes.md"
+echo "  gh release create v$VERSION \"$ARCHIVE\" --title \"TuiMu v$VERSION\" --notes-file release_notes.md"
