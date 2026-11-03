@@ -69,17 +69,7 @@ impl Default for LyricLine {
 }
 
 pub fn fetch(artist: &str, title: &str, duration: Option<f64>) -> Result<Lyrics> {
-    let cleaned = clean_query(artist, title);
-    let original = Query {
-        artist: artist.trim().to_string(),
-        title: title.trim().to_string(),
-    };
-
-    let mut queries = vec![cleaned];
-    if original.artist != queries[0].artist || original.title != queries[0].title {
-        queries.push(original);
-    }
-
+    let queries = build_queries(artist, title);
     let mut last_error = None;
 
     for query in &queries {
@@ -87,20 +77,51 @@ pub fn fetch(artist: &str, title: &str, duration: Option<f64>) -> Result<Lyrics>
             continue;
         }
 
-        let mut durations = Vec::new();
-        if let Some(duration) = duration.filter(|value| value.is_finite() && *value > 60.0) {
-            durations.push(Some(duration));
-        }
-        durations.push(None);
-
-        for duration in durations {
-            match retry(|| fetch_exact(query, duration)) {
+        // Structured attempts: exact match first, then fuzzy searches. Exact
+        // matching with the real duration is authoritative when available.
+        let known_duration = duration.filter(|value| value.is_finite() && *value > 60.0);
+        if let Some(known) = known_duration {
+            match retry(|| fetch_exact(query, Some(known))) {
                 Ok(Some(lyrics)) => return Ok(lyrics.with_source("LrcLib")),
                 Ok(None) => {}
                 Err(error) => last_error = Some(error),
             }
+        }
 
-            match retry(|| fetch_search(query, duration)) {
+        match retry(|| fetch_exact(query, None)) {
+            Ok(Some(lyrics)) => return Ok(lyrics.with_source("LrcLib")),
+            Ok(None) => {}
+            Err(error) => last_error = Some(error),
+        }
+
+        match retry(|| fetch_search(query, duration)) {
+            Ok(Some(lyrics)) => return Ok(lyrics.with_source("LrcLib")),
+            Ok(None) => {}
+            Err(error) => last_error = Some(error),
+        }
+
+        // Channel-derived artist names are often wrong ("Warner Music
+        // Indonesia"); searching by title alone reaches more local tracks.
+        if !query.artist.is_empty() {
+            let title_only = Query {
+                artist: String::new(),
+                title: query.title.clone(),
+            };
+            match retry(|| fetch_search(&title_only, duration)) {
+                Ok(Some(lyrics)) => return Ok(lyrics.with_source("LrcLib")),
+                Ok(None) => {}
+                Err(error) => last_error = Some(error),
+            }
+        }
+    }
+
+    // Last resort: LrcLib's free-text search over "artist title".
+    if let Some(query) = queries.iter().find(|query| !query.title.is_empty()) {
+        let text = format!("{} {}", query.artist, query.title)
+            .trim()
+            .to_string();
+        if !text.is_empty() {
+            match retry(|| fetch_free_text(&text, duration)) {
                 Ok(Some(lyrics)) => return Ok(lyrics.with_source("LrcLib")),
                 Ok(None) => {}
                 Err(error) => last_error = Some(error),
@@ -111,6 +132,168 @@ pub fn fetch(artist: &str, title: &str, duration: Option<f64>) -> Result<Lyrics>
     match last_error {
         Some(error) => Err(error),
         None => Ok(Lyrics::default()),
+    }
+}
+
+/// Words that mark YouTube upload clutter rather than track names. Indonesian
+/// uploads use "Lirik", "Lagu", and "Video Klip" where English uploads use
+/// "Lyrics" and "Official Music Video".
+const NOISE_WORDS: &[&str] = &[
+    "official",
+    "video",
+    "videos",
+    "lirik",
+    "lagu",
+    "lyrics",
+    "lyric",
+    "audio",
+    "klip",
+    "videoclip",
+    "mv",
+    "hd",
+    "4k",
+    "visualizer",
+    "remastered",
+    "remaster",
+    "album",
+];
+
+/// Tokens stripped from the end of channel-derived artist names.
+const CHANNEL_SUFFIXES: &[&str] = &["official", "vevo", "topic", "channel"];
+
+fn build_queries(artist: &str, title: &str) -> Vec<Query> {
+    let raw = Query {
+        artist: artist.trim().to_string(),
+        title: title.trim().to_string(),
+    };
+    let normalized = normalize_query(&raw);
+
+    let mut queries = Vec::new();
+    for query in [normalized, raw] {
+        if !query.title.is_empty() && !queries.contains(&query) {
+            queries.push(query);
+        }
+    }
+    queries
+}
+
+fn normalize_query(query: &Query) -> Query {
+    let (artist, title) = split_artist_title(&query.artist, &query.title);
+    Query {
+        artist: clean_artist(&artist),
+        title: clean_title(&title),
+    }
+}
+
+/// YouTube music uploads are titled "Artist - Title (...)", often with the
+/// label channel as metadata artist. Trust the dash-separated prefix as the
+/// artist whenever it is present.
+fn split_artist_title(artist: &str, title: &str) -> (String, String) {
+    for separator in [" - ", " – ", " — ", " -- "] {
+        if let Some((prefix, suffix)) = title.split_once(separator)
+            && !prefix.trim().is_empty()
+            && !suffix.trim().is_empty()
+            && prefix.trim().len() <= 60
+        {
+            return (prefix.trim().to_string(), suffix.trim().to_string());
+        }
+    }
+    (artist.trim().to_string(), title.trim().to_string())
+}
+
+fn clean_title(title: &str) -> String {
+    let sanitized: String = title
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => ' ',
+            _ => c,
+        })
+        .collect();
+    let text = strip_noise_groups(&sanitized);
+    text.split_whitespace()
+        .filter(|token| {
+            let bare = token
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase();
+            !NOISE_WORDS.contains(&bare.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Drop parenthesized/bracketed groups that contain upload clutter, e.g.
+/// "(Official Music Video)", "[LIRIK]", or "(Full Album)".
+fn strip_noise_groups(title: &str) -> String {
+    let mut result = String::new();
+    let mut group = String::new();
+    let mut depth = 0usize;
+
+    for ch in title.chars() {
+        match ch {
+            '(' | '[' | '{' => {
+                depth += 1;
+                if depth > 1 {
+                    group.push(ch);
+                }
+            }
+            ')' | ']' | '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    if !group_is_noise(&group) {
+                        result.push('(');
+                        result.push_str(&group);
+                        result.push(')');
+                    }
+                    group.clear();
+                } else {
+                    group.push(ch);
+                }
+            }
+            _ if depth > 0 => group.push(ch),
+            _ => result.push(ch),
+        }
+    }
+
+    // Unclosed trailing group, e.g. "Song (Official".
+    if !group.is_empty() && !group_is_noise(&group) {
+        result.push('(');
+        result.push_str(&group);
+    }
+    result
+}
+
+fn group_is_noise(group: &str) -> bool {
+    group.split_whitespace().any(|token| {
+        let bare = token
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase();
+        NOISE_WORDS.contains(&bare.as_str())
+    })
+}
+
+fn clean_artist(artist: &str) -> String {
+    let mut tokens: Vec<&str> = artist.split_whitespace().collect();
+    while let Some(last) = tokens.last() {
+        if *last == "-" {
+            tokens.pop();
+            continue;
+        }
+        let bare = last
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase();
+        if CHANNEL_SUFFIXES.contains(&bare.as_str()) {
+            tokens.pop();
+        } else if bare.len() > 4 && bare.ends_with("vevo") {
+            let stripped = &last[..last.len() - 4];
+            *tokens.last_mut().expect("token exists") = stripped;
+        } else {
+            break;
+        }
+    }
+    if tokens.is_empty() {
+        artist.trim().to_string()
+    } else {
+        tokens.join(" ")
     }
 }
 
@@ -128,25 +311,6 @@ fn retry<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
         }
     }
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("lyrics request failed")))
-}
-
-fn clean_query(artist: &str, title: &str) -> Query {
-    Query {
-        artist: clean(artist),
-        title: clean(title),
-    }
-}
-
-fn clean(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| match c {
-            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => ' ',
-            _ => c,
-        })
-        .collect::<String>()
-        .trim()
-        .to_string()
 }
 
 fn fetch_exact(query: &Query, duration: Option<f64>) -> Result<Option<Lyrics>> {
@@ -192,6 +356,40 @@ fn fetch_search(query: &Query, duration: Option<f64>) -> Result<Option<Lyrics>> 
     }
 
     Ok(None)
+}
+
+/// Free-text search fallback: `q` searches across artist and track names,
+/// which finds local-language tracks whose metadata differs from YouTube.
+fn fetch_free_text(text: &str, duration: Option<f64>) -> Result<Option<Lyrics>> {
+    let params = vec![("q", text.to_string())];
+    let Some(json) = get_json_with_timeout(&format!("{}/search", API_ROOT), &params, 10)? else {
+        return Ok(None);
+    };
+    let Some(results) = json.as_array() else {
+        return Ok(None);
+    };
+
+    // LrcLib ranks by relevance; among candidates prefer the closest
+    // duration so the synced lyrics line up with the audio.
+    let mut best: Option<Lyrics> = None;
+    let mut best_distance = f64::INFINITY;
+    for item in results {
+        let Some(lyrics) = lyrics_from_object_with_source(item, "LrcLib") else {
+            continue;
+        };
+        let distance = match (duration, item.get("duration").and_then(Value::as_f64)) {
+            (Some(wanted), Some(candidate)) if (wanted - candidate).abs() <= 7.0 => {
+                (wanted - candidate).abs()
+            }
+            _ => f64::INFINITY,
+        };
+        if best.is_none() || distance < best_distance {
+            best = Some(lyrics);
+            best_distance = distance;
+        }
+    }
+
+    Ok(best)
 }
 
 fn get_json_with_timeout(
@@ -398,7 +596,7 @@ fn score(value: &Value, query: &Query, duration: Option<f64>) -> f64 {
     score
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Query {
     artist: String,
     title: String,
@@ -484,5 +682,81 @@ mod tests {
         assert_eq!(lyrics.current_line(19.9), Some(0));
         assert_eq!(lyrics.current_line(20.0), Some(1));
         assert_eq!(lyrics.current_line(31.0), Some(2));
+    }
+
+    #[test]
+    fn cleans_youtube_noise_from_titles() {
+        assert_eq!(clean_title("Monokrom (Video Klip Official)"), "Monokrom");
+        assert_eq!(clean_title("Dan... (Official Music Video)"), "Dan...");
+        assert_eq!(
+            clean_title("Hati-Hati di Jalan [LIRIK]"),
+            "Hati-Hati di Jalan"
+        );
+        assert_eq!(
+            clean_title("Separuh Aku (Official Music Video LIRIK)"),
+            "Separuh Aku"
+        );
+        assert_eq!(
+            clean_title("Kau Adalah (Isyana Sarasvati)"),
+            "Kau Adalah (Isyana Sarasvati)"
+        );
+        assert_eq!(
+            clean_title("Cinta Luar Biasa (Audio Official)"),
+            "Cinta Luar Biasa"
+        );
+    }
+
+    #[test]
+    fn strips_channel_suffixes_from_artists() {
+        assert_eq!(clean_artist("Sheila On 7 - Topic"), "Sheila On 7");
+        assert_eq!(clean_artist("TulusVEVO"), "Tulus");
+        assert_eq!(clean_artist("Tulus Official"), "Tulus");
+        assert_eq!(clean_artist("NOAH Official Channel"), "NOAH");
+        assert_eq!(clean_artist("Official"), "Official");
+    }
+
+    #[test]
+    fn splits_artist_from_youtube_titles() {
+        let (artist, title) = split_artist_title(
+            "Warner Music Indonesia",
+            "Tulus - Monokrom (Video Klip Official)",
+        );
+        assert_eq!(artist, "Tulus");
+        assert_eq!(title, "Monokrom (Video Klip Official)");
+
+        let (artist, title) = split_artist_title("Sheila On 7", "Dan...");
+        assert_eq!(artist, "Sheila On 7");
+        assert_eq!(title, "Dan...");
+
+        let (artist, title) = split_artist_title("x", "Tulus – Monokrom");
+        assert_eq!(artist, "Tulus");
+        assert_eq!(title, "Monokrom");
+    }
+
+    #[test]
+    fn normalizes_local_music_queries() {
+        let query = normalize_query(&Query {
+            artist: "Tulus Official".into(),
+            title: "Tulus - Monokrom (Video Klip Official)".into(),
+        });
+        assert_eq!(query.artist, "Tulus");
+        assert_eq!(query.title, "Monokrom");
+
+        let query = normalize_query(&Query {
+            artist: "Sheila On 7 - Topic".into(),
+            title: "Sheila On 7 - Dan... (Official Music Video)".into(),
+        });
+        assert_eq!(query.artist, "Sheila On 7");
+        assert_eq!(query.title, "Dan...");
+    }
+
+    #[test]
+    fn builds_deduped_queries() {
+        let queries = build_queries("Tulus", "Monokrom");
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].artist, "Tulus");
+
+        let queries = build_queries("Tulus Official", "Tulus - Monokrom (Official Music Video)");
+        assert_eq!(queries.len(), 2);
     }
 }

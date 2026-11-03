@@ -194,7 +194,7 @@ caches is not required.
 - The quality shown next to each track is an estimate based on title tags and source metadata, not a measurement of the actual stream.
 - YouTube stream extraction uses yt-dlp's Android player client for reliability; the app relaunches mpv per source to send the required `Referer` headers without breaking playback.
 - All audio extraction goes through yt-dlp and is passed to mpv as a direct URL - no browser session or cookies are used.
-- Lyrics are fetched automatically from [LrcLib](https://lrclib.net/) and shown in the right-hand panel; `#` / `F3` hides or shows it.
+- Lyrics are fetched automatically from [LrcLib](https://lrclib.net/) and shown in the right-hand panel; `#` / `F3` hides or shows it. YouTube title clutter ("Official Music Video", "Lirik", "Video Klip", channel suffixes) is stripped before searching, so local-language tracks match their LrcLib entries.
 - Printable keys are captured by the search box while it is focused; shortcuts such as `?`, `@`, and `#` are active in the results and queue views.
 
 ## Troubleshooting
