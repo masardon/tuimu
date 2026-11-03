@@ -8,6 +8,10 @@ No accounts, no logins, no paid APIs.
 [![GitHub issues](https://img.shields.io/github/issues/masardon/tuimu)](https://github.com/masardon/tuimu/issues)
 [![GitHub license](https://img.shields.io/github/license/masardon/tuimu)](https://github.com/masardon/tuimu/blob/main/LICENSE)
 
+## Sneak Peek
+
+![tuimu terminal music player](images/tuimu.png)
+
 ## Requirements
 
 - [Rust](https://www.rust-lang.org/) (2024 edition) to build
