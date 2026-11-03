@@ -51,6 +51,14 @@ Or run in development: `cargo run`
 
 ### Using the Installation Script
 
+One-liner (downloads the latest release build — no Cargo or repo clone needed):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/masardon/tuimu/main/install.sh | bash
+```
+
+Or step by step:
+
 1. Download the installation script:
    ```bash
    curl -O https://raw.githubusercontent.com/masardon/tuimu/main/install.sh
@@ -65,6 +73,18 @@ Or run in development: `cargo run`
    ```
 
 ### Building for Release
+
+Release binaries (`x86_64` and `aarch64`) are built automatically by GitHub
+Actions whenever a version tag (`v*`) is pushed; `install.sh` always pulls the
+latest one. To cut a release manually:
+
+```bash
+# after bumping version in Cargo.toml
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+To build locally instead:
 
 1. Clean caches:
    ```bash
