@@ -3,7 +3,6 @@ mod input;
 mod lyrics;
 mod model;
 mod mpv;
-mod psalmnote;
 mod ui;
 mod ytdlp;
 

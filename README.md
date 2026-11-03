@@ -13,7 +13,7 @@ No accounts, no logins, no paid APIs.
 - [Rust](https://www.rust-lang.org/) (2024 edition) to build
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) - finds and extracts audio
 - [mpv](https://mpv.io/) - plays audio over JSON IPC
-- [curl](https://curl.se/) - optional, only needed for Spotify track metadata lookup
+- [curl](https://curl.se/) - used for lyrics lookups and optional Spotify track metadata lookup
 
 ## Install
 
@@ -231,7 +231,7 @@ rm -rf ~/.local/share/tuimu/
 - The quality shown next to each track is an estimate based on title tags and source metadata, not a measurement of the actual stream.
 - YouTube stream extraction uses yt-dlp's Android player client for reliability; the app relaunches mpv per source to send the required `Referer` headers without breaking playback.
 - All audio extraction goes through yt-dlp and is passed to mpv as a direct URL - no browser session or cookies are used.
-- The lyrics feature works with or without a currently playing track.
+- The lyrics feature works with or without a currently playing track; lyrics are fetched from [LrcLib](https://lrclib.net/).
 - Printable keys are captured by the search box while it is focused; shortcuts such as `?`, `@`, and `#` are active in the results and queue views.
 
 ## Troubleshooting

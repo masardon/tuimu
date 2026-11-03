@@ -74,7 +74,6 @@ pub struct LyricsState {
     pub follow: bool,
     pub instrumental: bool,
     pub source: Option<String>,
-    pub is_indonesian: bool,
 }
 
 pub struct App {
@@ -114,7 +113,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(mpv: Mpv, _lyrics_enabled: bool) -> Self {
+    pub fn new(mpv: Mpv, lyrics_enabled: bool) -> Self {
         let (search_tx, search_rx) = mpsc::channel();
         let (play_tx, play_rx) = mpsc::channel();
         let (lyrics_tx, lyrics_rx) = mpsc::channel();
@@ -141,7 +140,7 @@ impl App {
             loading: false,
             tick: 0,
             lyrics: LyricsState::default(),
-            lyrics_enabled: true,
+            lyrics_enabled,
             quality_filter: QualityFilter::All,
             prev_volume: 70.0,
             search_seq: 0,
@@ -181,37 +180,13 @@ impl App {
         }
 
         while let Ok(message) = self.lyrics_rx.try_recv() {
-            if self.lyrics.track_url.as_deref() == Some(&message.track_url)
-                || self.current_track_url() == Some(&message.track_url)
-            {
-                self.lyrics_pending.remove(&message.track_url);
-                self.lyrics_cache
-                    .insert(message.track_url.clone(), message.result.clone());
-                if self.lyrics.open && self.lyrics.track_url.as_deref() == Some(&message.track_url)
-                {
-                    match &message.result {
-                        Ok(lyrics) => {
-                            self.lyrics.lines = Some(lyrics.clone());
-                            self.lyrics.loading = false;
-                            self.lyrics.error = None;
-                            self.lyrics.instrumental = lyrics.instrumental;
-                            self.lyrics.source = lyrics.source.clone();
-                            self.lyrics.is_indonesian = lyrics.is_indonesian;
-                            if self.lyrics.follow {
-                                self.scroll_to_current_lyric();
-                            }
-                        }
-                        Err(error) => {
-                            self.lyrics.lines = None;
-                            self.lyrics.loading = false;
-                            self.lyrics.error = Some(error.clone());
-                        }
-                    }
-                }
-            } else {
-                self.lyrics_pending.remove(&message.track_url);
-                self.lyrics_cache
-                    .insert(message.track_url.clone(), message.result);
+            self.lyrics_pending.remove(&message.track_url);
+            let is_current = self.lyrics.track_url.as_deref() == Some(message.track_url.as_str())
+                || self.current_track_url() == Some(message.track_url.as_str());
+            self.lyrics_cache
+                .insert(message.track_url.clone(), message.result.clone());
+            if is_current && self.lyrics.open {
+                self.apply_lyrics_result(&message.result);
             }
         }
 
@@ -521,10 +496,7 @@ impl App {
 
     pub fn toggle_lyrics(&mut self) {
         if !self.lyrics_enabled {
-            self.set_status(
-                "Lyrics are disabled. Enable them in the configuration.",
-                true,
-            );
+            self.set_status("Lyrics are disabled by --no-lyrics.", true);
             return;
         }
 
@@ -533,45 +505,86 @@ impl App {
             return;
         }
 
-        // Open lyrics window even if no track is playing
+        // Open the window even if no track is playing.
         self.lyrics.open = true;
-        self.lyrics.loading = false;
-        self.lyrics.error = None;
         self.lyrics.scroll = 0;
         self.lyrics.follow = true;
+        self.lyrics.loading = false;
+        self.lyrics.error = None;
 
-        if let Some(track) = self.current_track() {
-            let track_url = track.url.clone();
-            let title = track.title.clone();
-            let artist = track.artist.clone();
-            let duration = track.duration;
-
-            let needs_fetch = !self.lyrics_pending.contains(&track_url)
-                && !self.lyrics_cache.contains_key(&track_url);
-            if needs_fetch {
-                self.lyrics_pending.insert(track_url.clone());
-
-                self.lyrics.loading = true;
-                self.lyrics.error = None;
-                self.lyrics.title = title.clone();
-                self.lyrics.artist = artist.clone();
-                self.lyrics.track_url = Some(track_url.clone());
-
-                let tx = self.lyrics_tx.clone();
-                thread::Builder::new()
-                    .name("lyrics".into())
-                    .spawn(move || {
-                        let result = lyrics::fetch(&artist, &title, duration)
-                            .map_err(|error| format!("Could not fetch lyrics: {error:#}"));
-                        let _ = tx.send(LyricsMessage { track_url, result });
-                    })
-                    .unwrap();
-            }
-            self.lyrics.open = true;
-            self.lyrics.follow = true;
-            self.lyrics.scroll = 0;
-        } else {
+        if self.current_track().is_none() {
+            self.lyrics.lines = None;
+            self.lyrics.instrumental = false;
+            self.lyrics.source = None;
+            self.lyrics.track_url = None;
             self.set_status("No track playing.", true);
+            return;
+        }
+
+        self.request_lyrics_for_current();
+    }
+
+    fn request_lyrics_for_current(&mut self) {
+        let Some(track) = self.current_track().cloned() else {
+            return;
+        };
+
+        let track_url = track.url.clone();
+        self.lyrics.track_url = Some(track_url.clone());
+        self.lyrics.title = track.title.clone();
+        self.lyrics.artist = track.artist.clone();
+        self.lyrics.error = None;
+        self.lyrics.instrumental = false;
+        self.lyrics.source = None;
+
+        if let Some(cached) = self.lyrics_cache.get(&track_url).cloned() {
+            self.apply_lyrics_result(&cached);
+            return;
+        }
+
+        if self.lyrics_pending.contains(&track_url) {
+            self.lyrics.loading = true;
+            return;
+        }
+
+        self.lyrics.loading = true;
+        self.lyrics.lines = None;
+        self.lyrics_pending.insert(track_url.clone());
+
+        let tx = self.lyrics_tx.clone();
+        let artist = track.artist.clone();
+        let title = track.title.clone();
+        let duration = track.duration;
+        let spawn_result = thread::Builder::new().name("lyrics".into()).spawn(move || {
+            let result = lyrics::fetch(&artist, &title, duration)
+                .map_err(|error| format!("Could not fetch lyrics: {error:#}"));
+            let _ = tx.send(LyricsMessage { track_url, result });
+        });
+
+        if let Err(error) = spawn_result {
+            self.lyrics_pending.remove(&track.url);
+            self.lyrics.loading = false;
+            self.lyrics.error = Some(format!("Could not start lyrics fetch: {error}"));
+        }
+    }
+
+    fn apply_lyrics_result(&mut self, result: &Result<Lyrics, String>) {
+        match result {
+            Ok(lyrics) => {
+                self.lyrics.lines = Some(lyrics.clone());
+                self.lyrics.loading = false;
+                self.lyrics.error = None;
+                self.lyrics.instrumental = lyrics.instrumental;
+                self.lyrics.source = lyrics.source.clone();
+                if self.lyrics.follow {
+                    self.scroll_to_current_lyric();
+                }
+            }
+            Err(error) => {
+                self.lyrics.lines = None;
+                self.lyrics.loading = false;
+                self.lyrics.error = Some(error.clone());
+            }
         }
     }
 
@@ -650,10 +663,15 @@ impl App {
         self.player.position = 0.0;
         self.player.duration = track.duration.unwrap_or(0.0);
         self.player.paused = false;
+
+        let lyrics_open = self.lyrics.open;
+        let lyrics_follow = self.lyrics.follow;
         self.lyrics = LyricsState::default();
-        self.lyrics.track_url = Some(track.url.clone());
-        self.lyrics.title = track.title.clone();
-        self.lyrics.artist = track.artist.clone();
+        self.lyrics.open = lyrics_open;
+        self.lyrics.follow = lyrics_follow;
+        if lyrics_open {
+            self.request_lyrics_for_current();
+        }
 
         if self.mpv_closed {
             self.player.loading = false;

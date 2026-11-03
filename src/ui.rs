@@ -481,7 +481,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(vec![
             Line::from(spans),
             Line::from(Span::styled(
-                "yt-dlp finds the audio · mpv plays it · LrcLib & PsalmNote provide lyrics",
+                "yt-dlp finds the audio · mpv plays it · LrcLib provides lyrics",
                 Style::default().fg(ACCENT_DIM).italic(),
             )),
         ])
@@ -547,53 +547,73 @@ fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(" No lyrics found", Style::default().fg(Color::White)),
         ])]
     } else if let Some(lines) = &app.lyrics.lines {
-        let mut content = Vec::new();
-        let start = 5; // app.lyrics_scroll_height() / 2;
-        let visible = 10; // app.lyrics_scroll_height();
-        let scroll_start = app.lyrics.scroll.saturating_sub(start);
-        let scroll_end =
-            (scroll_start + visible).min(lines.synced.as_ref().map_or(0, |lines| lines.len()));
+        let total = lines.line_count();
+        if total == 0 {
+            vec![Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled("—", Style::default().fg(MUTED)),
+                Span::styled(" No lyrics found", Style::default().fg(Color::White)),
+            ])]
+        } else {
+            let visible = (inner.height as usize).saturating_sub(4).max(1);
+            let half = visible / 2;
+            let scroll_start = app
+                .lyrics
+                .scroll
+                .saturating_sub(half)
+                .min(total.saturating_sub(1));
+            let scroll_end = (scroll_start + visible).min(total);
+            let current_line = app
+                .lyrics
+                .lines
+                .as_ref()
+                .and_then(|lyrics| lyrics.current_line(app.player.position));
 
-        if scroll_start > 0 {
-            content.push(Line::from(vec![
-                Span::styled("   ", Style::default()),
-                Span::styled("⋮", Style::default().fg(MUTED)),
-            ]));
-        }
-
-        if let Some(synced_lines) = &lines.synced {
-            for (index, line) in synced_lines[scroll_start..scroll_end].iter().enumerate() {
-                let line_index = scroll_start + index;
-                let is_current = app.lyrics.follow
-                    && app.current_track().is_some()
-                    && app
-                        .lyrics
-                        .lines
-                        .as_ref()
-                        .and_then(|l| l.current_line(app.player.position))
-                        == Some(line_index);
-                let prefix = if is_current {
-                    Span::styled("▶ ", Style::default().fg(GREEN).bold())
-                } else {
-                    Span::styled("  ", Style::default())
-                };
-                let text = if is_current {
-                    Span::styled(&line.text, Style::default().fg(GREEN))
-                } else {
-                    Span::raw(&line.text)
-                };
-                content.push(Line::from(vec![prefix, text]));
-            }
-
-            if scroll_end < synced_lines.len() {
+            let mut content = Vec::new();
+            if scroll_start > 0 {
                 content.push(Line::from(vec![
                     Span::styled("   ", Style::default()),
                     Span::styled("⋮", Style::default().fg(MUTED)),
                 ]));
             }
-        }
 
-        content
+            if let Some(synced_lines) = &lines.synced {
+                for (index, line) in synced_lines[scroll_start..scroll_end].iter().enumerate() {
+                    let line_index = scroll_start + index;
+                    let is_current = app.lyrics.follow
+                        && app.current_track().is_some()
+                        && current_line == Some(line_index);
+                    let prefix = if is_current {
+                        Span::styled("▶ ", Style::default().fg(GREEN).bold())
+                    } else {
+                        Span::styled("  ", Style::default())
+                    };
+                    let text = if is_current {
+                        Span::styled(&line.text, Style::default().fg(GREEN))
+                    } else {
+                        Span::raw(&line.text)
+                    };
+                    content.push(Line::from(vec![prefix, text]));
+                }
+            } else if let Some(plain) = &lines.plain {
+                let plain_lines: Vec<&str> = plain.lines().collect();
+                for text in plain_lines[scroll_start..scroll_end].iter() {
+                    content.push(Line::from(vec![
+                        Span::styled("  ", Style::default()),
+                        Span::raw(*text),
+                    ]));
+                }
+            }
+
+            if scroll_end < total {
+                content.push(Line::from(vec![
+                    Span::styled("   ", Style::default()),
+                    Span::styled("⋮", Style::default().fg(MUTED)),
+                ]));
+            }
+
+            content
+        }
     } else {
         vec![]
     };
@@ -608,20 +628,15 @@ fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(info, Style::default().fg(MUTED)),
     ]);
 
-    // Add source information
-    let source_info = if let Some(source) = &app.lyrics.source {
-        let source_text = if app.lyrics.is_indonesian {
-            format!("Source: {} (Indonesian)", source)
-        } else {
-            format!("Source: {}", source)
-        };
-        Some(Line::from(vec![
+    let source_info = app.lyrics.source.as_ref().map(|source| {
+        Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled(source_text, Style::default().fg(Color::Yellow)),
-        ]))
-    } else {
-        None
-    };
+            Span::styled(
+                format!("Source: {source}"),
+                Style::default().fg(Color::Yellow),
+            ),
+        ])
+    });
 
     let controls = Line::from(vec![
         Span::styled("  ", Style::default()),
