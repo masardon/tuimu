@@ -162,68 +162,31 @@ Paste a single Spotify track URL - `tuimu` pulls the title from Spotify's public
 ## Scripts
 
 ### clean-cache.sh
-A script to clean up all caches before building or releasing tuimu:
+Removes this repository's `./target` build directory. It does not touch global
+Cargo, mpv, or yt-dlp caches:
 ```bash
 ./clean-cache.sh
 ```
 
 ### install.sh
-A script to install tuimu without requiring Cargo:
+Downloads the latest pre-built release for your architecture and installs it to
+`/usr/local/bin`:
 ```bash
 ./install.sh
 ```
 
 ### build-release.sh
-A script to build tuimu for release and package it:
+Runs the test suite, builds a release binary, and packages it as
+`tuimu-linux-<arch>.tar.gz`:
 ```bash
 ./build-release.sh
 ```
 
 ## Cache Management
 
-### Before Release/Build
-
-To ensure a clean build and release:
-
-1. **Use the clean-cache script** (recommended):
-   ```bash
-   ./clean-cache.sh
-   ```
-
-2. **Manual cleanup** (if needed):
-   ```bash
-   # Clean Rust build cache
-   cargo clean
-   
-   # Clear Cargo registry and git cache
-   rm -rf ~/.cargo/registry/cache/
-   rm -rf ~/.cargo/git/db/
-   
-   # Clear yt-dlp cache (if used)
-   rm -rf ~/.cache/yt-dlp/
-   
-   # Clear mpv cache (if used)
-   rm -rf ~/.mpv/
-   
-   # Clear application cache (if any)
-   rm -rf ~/.local/share/tuimu/
-   ```
-
-### For Regular Maintenance
-
-To clear caches periodically:
-
-```bash
-# Use the clean-cache script
-./clean-cache.sh
-
-# Or manually clear all caches
-rm -rf ~/.cargo/registry/cache/
-rm -rf ~/.cargo/git/db/
-rm -rf ~/.cache/yt-dlp/
-rm -rf ~/.mpv/
-rm -rf ~/.local/share/tuimu/
-```
+`tuimu` does not keep its own application cache. To start a build from scratch,
+run `cargo clean` (or `./clean-cache.sh`); deleting global Cargo or media-player
+caches is not required.
 
 ## Notes
 

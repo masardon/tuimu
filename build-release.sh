@@ -1,82 +1,62 @@
 #!/bin/bash
 
-# Tuimu Build Script for Release
-# This script builds tuimu for release and packages it
+# Build tuimu for release and package the binary with documentation.
 
 set -e
 
 echo "=== Tuimu Build Script ==="
 
-# Get version from Cargo.toml
 VERSION=$(grep "^version" Cargo.toml | cut -d '"' -f 2)
 echo "Building version: $VERSION"
 
-# Clean previous builds
-echo "Cleaning previous builds..."
-cargo clean
+ARCH=$(uname -m)
+case $ARCH in
+    x86_64 | aarch64 | armv7l) ;;
+    *)
+        echo "Error: Unsupported architecture: $ARCH"
+        exit 1
+        ;;
+esac
+echo "Target architecture: $ARCH"
 
-# Run tests
 echo "Running tests..."
 cargo test
 
-# Build for release
 echo "Building for release..."
 cargo build --release
 
-# Create release notes
 cat > release_notes.md << EOF
 tuimu v$VERSION
 
-This release includes:
-- Fixed F1, F2, F3 key functionality
-- Added lyrics toggle with F3
-- Improved search and navigation
-- Enhanced UI with better highlighting
-- Fixed cache management
-- Added installation scripts
+A fast, free terminal music player.
 
-Changes:
-- F1 now toggles help window
-- F2 cycles through search sources
-- F3 toggles lyrics window
-- Fixed cursor movement in results list
-- Improved search input handling
-- Added comprehensive documentation
-- Added cache management scripts
-- Added installation scripts for Linux
+- Search YouTube and SoundCloud with yt-dlp
+- Paste any URL supported by yt-dlp
+- Queue management, repeat modes, seek and volume controls
+- Synced and plain lyrics from LrcLib
+- Quality filters and sorting
 
-Installation:
+Install:
 - cargo install --git https://github.com/masardon/tuimu
-- Or use the provided install.sh script
+- Or download tuimu-linux-$ARCH.tar.gz and run ./install.sh
 
-For more information, see the README.md file.
+See README.md for key bindings and usage.
 EOF
 
-# Create package directory
-PACKAGE_DIR="tuimu-linux-x86_64"
+PACKAGE_DIR="tuimu-linux-$ARCH"
+ARCHIVE="$PACKAGE_DIR.tar.gz"
+rm -rf "$PACKAGE_DIR" "$ARCHIVE"
 mkdir -p "$PACKAGE_DIR"
 
-# Copy binaries and scripts
 cp target/release/tuimu "$PACKAGE_DIR/"
-cp README.md "$PACKAGE_DIR/"
-cp clean-cache.sh "$PACKAGE_DIR/"
-cp install.sh "$PACKAGE_DIR/"
+cp README.md LICENSE clean-cache.sh install.sh "$PACKAGE_DIR/"
 
-# Create archive
 echo "Creating archive..."
-tar -czf "tuimu-linux-x86_64.tar.gz" "$PACKAGE_DIR/"
-
-# Clean up
+tar -czf "$ARCHIVE" "$PACKAGE_DIR/"
 rm -rf "$PACKAGE_DIR"
 
 echo "=== Build complete ==="
-echo "Release package created: tuimu-linux-x86_64.tar.gz"
-echo ""
-echo "To install, run:"
-echo "  ./install.sh"
-echo ""
-echo "To clean caches before build, run:"
-echo "  ./clean-cache.sh"
+echo "Release package created: $ARCHIVE"
 echo ""
 echo "To submit to GitHub releases:"
-echo "  gh release create v$VERSION tuimu-linux-x86_64.tar.gz --title \"tuimu v$VERSION\" --notes \"$(cat release_notes.md)\""
+echo "  gh release create v$VERSION \"$ARCHIVE\" --title \"tuimu v$VERSION\" --notes-file release_notes.md"

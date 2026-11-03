@@ -1,22 +1,17 @@
 #!/bin/bash
 
 # Tuimu Installation Script for Linux
-# This script installs tuimu without requiring Cargo
+# Installs a pre-built release binary without requiring Cargo.
 
 set -e
 
 echo "=== Tuimu Installation Script ==="
 
-# Check if running as root
 if [ "$EUID" -eq 0 ]; then
     echo "Please do not run this script as root"
     exit 1
 fi
 
-# Check if we have the required tools
-echo "Checking required tools..."
-
-# Check if curl is installed
 if ! command -v curl &> /dev/null; then
     echo "Error: curl is not installed. Please install it first:"
     echo "  Ubuntu/Debian: sudo apt-get install curl"
@@ -25,61 +20,59 @@ if ! command -v curl &> /dev/null; then
     exit 1
 fi
 
-# Get system architecture
+if ! command -v tar &> /dev/null; then
+    echo "Error: tar is not installed."
+    exit 1
+fi
+
 ARCH=$(uname -m)
 case $ARCH in
-    x86_64) ARCH="x86_64" ;;
-    aarch64) ARCH="aarch64" ;;
-    armv7l) ARCH="armv7l" ;;
-    *) 
+    x86_64 | aarch64 | armv7l) ;;
+    *)
         echo "Error: Unsupported architecture: $ARCH"
         exit 1
         ;;
 esac
 
-# Get latest version from GitHub
-echo "Fetching latest version information..."
-LATEST_VERSION=$(curl -s "https://api.github.com/repos/masardon/tuimu/releases/latest" | grep -oP '"tag_name": "v\K[^"]+' || echo "latest")
-echo "Latest version: $LATEST_VERSION"
+DOWNLOAD_URL="https://github.com/masardon/tuimu/releases/latest/download/tuimu-linux-$ARCH.tar.gz"
 
-# Download URL
-DOWNLOAD_URL="https://github.com/masardon/tuimu/releases/download/$LATEST_VERSION/tuimu-$LATEST_VERSION-linux-$ARCH.tar.gz"
-
-# Create temporary directory
 TEMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TEMP_DIR"' EXIT
 cd "$TEMP_DIR"
 
-echo "Downloading tuimu..."
-curl -L -o tuimu.tar.gz "$DOWNLOAD_URL"
+echo "Downloading tuimu for $ARCH..."
+if ! curl -fL -o tuimu.tar.gz "$DOWNLOAD_URL"; then
+    echo "Error: Could not download $DOWNLOAD_URL"
+    echo "Check https://github.com/masardon/tuimu/releases for an available build."
+    exit 1
+fi
 
 echo "Extracting..."
 tar -xzf tuimu.tar.gz
 
-# Find the binary
-BINARY=$(find . -name "tuimu" -type f)
+BINARY=$(find . -type f -name tuimu -print -quit)
 if [ -z "$BINARY" ]; then
-    echo "Error: Could not find tuimu binary"
+    echo "Error: Could not find tuimu binary in the archive"
     exit 1
 fi
 
-# Make it executable
-chmod +x "$BINARY"
-
-# Install to /usr/local/bin
 echo "Installing to /usr/local/bin..."
-sudo mv "$BINARY" /usr/local/bin/tuimu
-
-# Clean up
-cd /
-rm -rf "$TEMP_DIR"
+sudo install -m 0755 "$BINARY" /usr/local/bin/tuimu
 
 echo "=== Installation complete ==="
 echo "tuimu has been installed to /usr/local/bin/tuimu"
 echo ""
-echo "You can now run it with:"
-echo "  tuimu"
-echo ""
-echo "For usage instructions, see the README.md file"
-echo ""
-echo "To uninstall, run:"
-echo "  sudo rm /usr/local/bin/tuimu"
+
+MISSING=0
+for dep in yt-dlp mpv curl; do
+    if ! command -v "$dep" &> /dev/null; then
+        echo "Warning: '$dep' was not found in PATH; tuimu needs it at runtime."
+        MISSING=1
+    fi
+done
+if [ "$MISSING" -eq 1 ]; then
+    echo ""
+    echo "Install missing dependencies, then run 'tuimu'."
+else
+    echo "Run it with: tuimu"
+fi
