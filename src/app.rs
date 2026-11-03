@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::input::TextInput;
 use crate::lyrics::{self, Lyrics};
-use crate::model::{Quality, QualityFilter, RepeatMode, SearchSource, Track};
+use crate::model::{QualityFilter, RepeatMode, SearchSource, Track};
 use crate::mpv::{Mpv, MpvMessage};
 use crate::ytdlp::{self, Lookup, StreamInfo};
 
@@ -82,6 +82,7 @@ pub struct App {
     pub focus: Focus,
     pub input: TextInput,
     pub source: SearchSource,
+    pub all_results: Vec<Track>,
     pub results: Vec<Track>,
     pub result_selected: usize,
     pub queue: Vec<Track>,
@@ -97,9 +98,6 @@ pub struct App {
     pub lyrics: LyricsState,
     pub lyrics_enabled: bool,
     pub quality_filter: QualityFilter,
-    // Quality cache to avoid re-computing quality for the same tracks (currently unused but kept for future optimization)
-    #[allow(dead_code)]
-    quality_cache: HashMap<String, Quality>,
     prev_volume: f64,
     search_seq: u64,
     search_tx: Sender<SearchMessage>,
@@ -125,6 +123,7 @@ impl App {
             focus: Focus::Search,
             input: TextInput::default(),
             source: SearchSource::YouTube,
+            all_results: Vec::new(),
             results: Vec::new(),
             result_selected: 0,
             queue: Vec::new(),
@@ -143,8 +142,7 @@ impl App {
             tick: 0,
             lyrics: LyricsState::default(),
             lyrics_enabled: true,
-            quality_filter: QualityFilter::High, // Default to high quality
-            quality_cache: HashMap::new(),
+            quality_filter: QualityFilter::All,
             prev_volume: 70.0,
             search_seq: 0,
             search_tx,
@@ -406,6 +404,7 @@ impl App {
         self.search_seq = self.search_seq.wrapping_add(1);
         let seq = self.search_seq;
         self.loading = true;
+        self.all_results.clear();
         self.results.clear();
         self.result_selected = 0;
         // Keep focus on Search to allow typing while results load
@@ -432,23 +431,39 @@ impl App {
         self.loading = false;
         match result {
             Ok(lookup) => {
-                let count = lookup.tracks.len();
-                self.results = lookup.tracks;
-                self.apply_quality_filter();
+                let Lookup { tracks, note } = lookup;
+                self.all_results = tracks;
                 self.result_selected = 0;
-                let mut message = if count == 0 {
+                self.apply_quality_filter();
+
+                let total = self.all_results.len();
+                let shown = self.results.len();
+                let mut message = if total == 0 {
                     "No results.".to_string()
-                } else if count == 1 {
-                    "1 result. Press Enter to play it.".to_string()
+                } else if shown == 0 {
+                    format!(
+                        "No results match the {} quality filter ({total} found). Press f to change the filter.",
+                        self.quality_filter.label()
+                    )
+                } else if shown == total {
+                    if shown == 1 {
+                        "1 result. Press Enter to play it.".to_string()
+                    } else {
+                        format!("{shown} results. Press Enter to play the selection.")
+                    }
                 } else {
-                    format!("{count} results. Press Enter to play the selection.")
+                    format!(
+                        "Showing {shown} of {total} results (quality filter: {}). Press Enter to play the selection.",
+                        self.quality_filter.label()
+                    )
                 };
-                if let Some(note) = lookup.note {
+                if let Some(note) = note {
                     message = format!("{note} {message}");
                 }
                 self.set_status(message, false);
             }
             Err(error) => {
+                self.all_results.clear();
                 self.results.clear();
                 self.result_selected = 0;
                 self.set_status(error, true);
@@ -1011,80 +1026,32 @@ impl App {
     }
 
     pub fn apply_quality_filter(&mut self) {
-        let original_count = self.results.len();
-        let before_filter = self.quality_filter;
-
-        // Optimize for large result sets
-        if original_count > 1000 {
-            // For very large sets, use a more efficient approach
-            let filtered: Vec<Track> = self
-                .results
-                .iter()
-                .filter(|track| match self.quality_filter {
-                    QualityFilter::All => true,
-                    QualityFilter::Lossless => track.quality == Quality::Lossless,
-                    QualityFilter::High => track.quality >= Quality::High,
-                    QualityFilter::Medium => track.quality >= Quality::Medium,
-                    QualityFilter::Low => track.quality >= Quality::Low,
-                })
-                .cloned()
-                .collect();
-            self.results = filtered;
-        } else {
-            // For smaller sets, use retain for better performance
-            self.results.retain(|track| match self.quality_filter {
-                QualityFilter::All => true,
-                QualityFilter::Lossless => track.quality == Quality::Lossless,
-                QualityFilter::High => track.quality >= Quality::High,
-                QualityFilter::Medium => track.quality >= Quality::Medium,
-                QualityFilter::Low => track.quality >= Quality::Low,
-            });
-        }
-
-        if self.results.len() < original_count {
-            let _filtered_count = original_count - self.results.len();
-            let quality_name = before_filter.label();
-
+        self.rebuild_filtered_results();
+        if !self.all_results.is_empty() {
             self.set_status(
                 format!(
-                    "Filtered: {} of {} tracks (quality: {})",
+                    "Quality filter: {} ({} of {} results)",
+                    self.quality_filter.label(),
                     self.results.len(),
-                    original_count,
-                    quality_name
+                    self.all_results.len()
                 ),
                 false,
             );
-
-            // Show detailed quality breakdown only for smaller sets
-            if original_count <= 100 {
-                let quality_breakdown = self.get_quality_breakdown();
-                if !quality_breakdown.is_empty() {
-                    self.set_status(format!("Quality breakdown: {}", quality_breakdown), false);
-                }
-            }
-
-            // Adjust selected index if it's out of bounds
-            if self.result_selected >= self.results.len() {
-                self.result_selected = self.results.len().saturating_sub(1);
-            }
         }
     }
 
-    fn get_quality_breakdown(&self) -> String {
-        let mut breakdown = std::collections::HashMap::new();
-
-        for track in &self.results {
-            *breakdown.entry(track.quality).or_insert(0) += 1;
+    fn rebuild_filtered_results(&mut self) {
+        self.results = self
+            .all_results
+            .iter()
+            .filter(|track| self.quality_filter.matches(track.quality))
+            .cloned()
+            .collect();
+        if self.results.is_empty() {
+            self.result_selected = 0;
+        } else {
+            self.result_selected = self.result_selected.min(self.results.len() - 1);
         }
-
-        let mut breakdown: Vec<_> = breakdown.into_iter().collect();
-        breakdown.sort_by(|a, b| b.0.cmp(&a.0));
-
-        breakdown
-            .into_iter()
-            .map(|(quality, count)| format!("{}: {}", quality.label(), count))
-            .collect::<Vec<_>>()
-            .join(", ")
     }
 
     pub fn cycle_quality_filter(&mut self) {
@@ -1098,14 +1065,10 @@ impl App {
         self.apply_quality_filter();
     }
 
-    #[allow(dead_code)]
-    pub fn get_quality_filter(&self) -> QualityFilter {
-        self.quality_filter
-    }
-
     pub fn sort_by_quality(&mut self) {
-        self.results
+        self.all_results
             .sort_by(|a, b| b.quality_score().cmp(&a.quality_score()));
+        self.rebuild_filtered_results();
         self.set_status(
             "Results sorted by quality (highest first)".to_string(),
             false,
@@ -1113,21 +1076,18 @@ impl App {
     }
 
     pub fn sort_by_duration(&mut self) {
-        self.results.sort_by(|a, b| {
+        self.all_results.sort_by(|a, b| {
             a.duration
                 .unwrap_or(0.0)
                 .total_cmp(&b.duration.unwrap_or(0.0))
         });
+        self.rebuild_filtered_results();
         self.set_status("Results sorted by duration".to_string(), false);
     }
 
     pub fn set_quality_preference(&mut self, quality: QualityFilter) {
         self.quality_filter = quality;
         self.apply_quality_filter();
-        self.set_status(
-            format!("Quality preference set to {}", quality.label()),
-            false,
-        );
     }
 
     pub fn toggle_high_quality_only(&mut self) {

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,9 +102,9 @@ pub struct Track {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Quality {
-    Low,     // < 128kbps, poor quality
-    Medium,  // 128-256kbps, standard quality
-    High,    // 256-320kbps, good quality
+    Low,      // < 128kbps, poor quality
+    Medium,   // 128-256kbps, standard quality
+    High,     // 256-320kbps, good quality
     Lossless, // FLAC, etc., lossless quality
 }
 
@@ -139,6 +138,16 @@ impl QualityFilter {
             Self::Low => "Low",
         }
     }
+
+    pub fn matches(self, quality: Quality) -> bool {
+        match self {
+            Self::All => true,
+            Self::Lossless => quality == Quality::Lossless,
+            Self::High => quality >= Quality::High,
+            Self::Medium => quality >= Quality::Medium,
+            Self::Low => quality >= Quality::Low,
+        }
+    }
 }
 
 impl Track {
@@ -149,12 +158,7 @@ impl Track {
     }
 
     pub fn quality_label(&self) -> &'static str {
-        match self.quality {
-            Quality::Low => "Low",
-            Quality::Medium => "Medium",
-            Quality::High => "High",
-            Quality::Lossless => "Lossless",
-        }
+        self.quality.label()
     }
 
     pub fn quality_score(&self) -> u8 {
@@ -168,7 +172,7 @@ impl Track {
 
     pub fn detect_quality(title: &str, source: Source) -> Quality {
         let title_lower = title.to_lowercase();
-        
+
         // Check for lossless indicators
         if title_lower.contains("flac")
             || title_lower.contains("wav")
@@ -206,35 +210,7 @@ impl Track {
             Source::YouTube => Quality::Medium, // YouTube varies, usually medium
             Source::SoundCloud => Quality::Medium, // SoundCloud varies, usually medium
             Source::Spotify => Quality::Medium, // Spotify is typically 160-320kbps
-            Source::Web => Quality::Low, // Unknown web sources are unpredictable
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn new_with_cache(title: String, artist: String, duration: Option<f64>, url: String, source: Source, quality_cache: &mut HashMap<String, Quality>) -> Self {
-        // Check if we have cached quality for this track
-        if let Some(cached_quality) = quality_cache.get(&url) {
-            return Self {
-                title,
-                artist,
-                duration,
-                url,
-                source,
-                quality: *cached_quality,
-            };
-        }
-
-        // Detect quality and cache it
-        let quality = Self::detect_quality(&title, source);
-        quality_cache.insert(url.clone(), quality);
-        
-        Self {
-            title,
-            artist,
-            duration,
-            url,
-            source,
-            quality,
+            Source::Web => Quality::Low,       // Unknown web sources are unpredictable
         }
     }
 }
@@ -375,16 +351,16 @@ mod tests {
     fn quality_filter_logic() {
         // Test All filter
         assert!(matches!(QualityFilter::All, _));
-        
+
         // Test Lossless filter
         assert_eq!(QualityFilter::Lossless.label(), "Lossless");
-        
+
         // Test High filter
         assert_eq!(QualityFilter::High.label(), "High");
-        
+
         // Test Medium filter
         assert_eq!(QualityFilter::Medium.label(), "Medium");
-        
+
         // Test Low filter
         assert_eq!(QualityFilter::Low.label(), "Low");
     }

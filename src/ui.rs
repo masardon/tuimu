@@ -138,7 +138,7 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
     });
     let table = Table::new(rows, widths)
         .header(
-            Row::new(["", "SRC", "TITLE", "ARTIST", "TIME", "QUALITY"])
+            Row::new(["", "SRC", "TITLE", "ARTIST", "TIME", "QUALITY~"])
                 .style(Style::default().fg(MUTED).bold()),
         )
         .column_spacing(1)
@@ -292,7 +292,7 @@ fn draw_queue(frame: &mut Frame, app: &App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(
-            Row::new(["", "#", "TITLE", "ARTIST", "TIME", "QUALITY"])
+            Row::new(["", "#", "TITLE", "ARTIST", "TIME", "QUALITY~"])
                 .style(Style::default().fg(MUTED).bold()),
         )
         .column_spacing(1)
