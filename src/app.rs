@@ -97,7 +97,8 @@ pub struct App {
     pub lyrics: LyricsState,
     pub lyrics_enabled: bool,
     pub quality_filter: QualityFilter,
-    // Quality cache to avoid re-computing quality for the same tracks
+    // Quality cache to avoid re-computing quality for the same tracks (currently unused but kept for future optimization)
+    #[allow(dead_code)]
     quality_cache: HashMap<String, Quality>,
     prev_volume: f64,
     search_seq: u64,
@@ -1106,6 +1107,7 @@ impl App {
         self.apply_quality_filter();
     }
 
+    #[allow(dead_code)]
     pub fn get_quality_filter(&self) -> QualityFilter {
         self.quality_filter
     }

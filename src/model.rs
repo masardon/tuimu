@@ -210,6 +210,7 @@ impl Track {
         }
     }
 
+    #[allow(dead_code)]
     pub fn new_with_cache(title: String, artist: String, duration: Option<f64>, url: String, source: Source, quality_cache: &mut HashMap<String, Quality>) -> Self {
         // Check if we have cached quality for this track
         if let Some(cached_quality) = quality_cache.get(&url) {

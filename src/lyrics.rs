@@ -5,7 +5,6 @@ use serde_json::Value;
 
 use crate::ytdlp::curl_bin;
 use crate::psalmnote::get_psalmnote_lyrics;
-use crate::model::{format_duration, Source};
 
 const API_ROOT: &str = "https://lrclib.net/api";
 const USER_AGENT: &str = "tuimu/0.1.0 (terminal music player)";
@@ -333,7 +332,7 @@ fn fetch_exact(query: &Query, duration: Option<f64>) -> Result<Option<Lyrics>> {
     let json = get_json_with_timeout(&format!("{}/get", API_ROOT), &params, 10)?;
     match lyrics_from_object_with_source(&json, "LrcLib") {
         Some(lyrics) => Ok(Some(lyrics)),
-        None => Err(anyhow::bail!("No lyrics found")),
+        None => Ok(None),
     }
 }
 
@@ -364,14 +363,23 @@ fn fetch_search(query: &Query, duration: Option<f64>) -> Result<Option<Lyrics>> 
 }
 
 fn get_json_with_timeout(url: &str, params: &[(&str, String)], timeout: u64) -> Result<Value> {
+    // Build query parameters string
+    let query_string = params
+        .iter()
+        .map(|(key, value)| format!("{}={}", key, urlencoding::encode(value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    
+    // Build full URL with query parameters
+    let full_url = if query_string.is_empty() {
+        url.to_string()
+    } else {
+        format!("{}?{}", url, query_string)
+    };
+
     let mut cmd = Command::new(curl_bin());
     cmd.args(["-sS", "--max-time", &timeout.to_string(), "-A", USER_AGENT]);
-
-    for (key, value) in params {
-        cmd.arg("-d").arg(format!("{}={}", key, value));
-    }
-
-    cmd.arg(url);
+    cmd.arg(&full_url);
 
     let output = cmd
         .stdout(Stdio::piped())
@@ -551,6 +559,7 @@ impl Default for Query {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{format_duration, Source};
 
     #[test]
     fn formats_durations() {
