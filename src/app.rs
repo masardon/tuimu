@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 
@@ -9,6 +10,7 @@ use crate::input::TextInput;
 use crate::lyrics::{self, Lyrics};
 use crate::model::{QualityFilter, RepeatMode, SearchSource, Track};
 use crate::mpv::{Mpv, MpvMessage, Player};
+use crate::playlist::{self, Playlist};
 use crate::ytdlp::{self, Lookup, StreamInfo};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,6 +111,51 @@ impl LyricsState {
     }
 }
 
+/// State of the playlist popups. `None` means no popup is open and keys go
+/// to the regular views.
+#[derive(Default)]
+pub enum PlaylistUi {
+    #[default]
+    None,
+    /// Text prompt used for both "save queue as playlist" and renaming.
+    NamePrompt {
+        action: NameAction,
+        input: TextInput,
+    },
+    /// Browser for saved playlists (and, one level down, their tracks).
+    Picker {
+        mode: PickerMode,
+        level: PickerLevel,
+        selected: usize,
+        names: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum NameAction {
+    SaveQueue,
+    Rename { old: String },
+}
+
+#[derive(Clone, Debug)]
+pub enum PickerMode {
+    Open,
+    /// Add a specific track to whichever playlist is chosen.
+    AddTo {
+        track: Track,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum PickerLevel {
+    Playlists,
+    /// Tracks of `playlist`, cached so the picker stays in sync with edits.
+    Tracks {
+        playlist: String,
+        tracks: Vec<Track>,
+    },
+}
+
 pub struct App {
     pub should_quit: bool,
     pub focus: Focus,
@@ -129,6 +176,8 @@ pub struct App {
     pub tick: u64,
     pub lyrics: LyricsState,
     pub lyrics_enabled: bool,
+    pub playlist_ui: PlaylistUi,
+    pub playlist_dir: PathBuf,
     pub quality_filter: QualityFilter,
     prev_volume: f64,
     search_seq: u64,
@@ -181,6 +230,8 @@ impl App {
                 ..LyricsState::default()
             },
             lyrics_enabled,
+            playlist_ui: PlaylistUi::None,
+            playlist_dir: playlist::playlists_dir().unwrap_or_else(|_| PathBuf::from(".")),
             quality_filter: QualityFilter::All,
             prev_volume: 70.0,
             search_seq: 0,
@@ -258,8 +309,12 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, text: &str) {
+        let text = text.replace(['\r', '\n'], " ");
+        if let PlaylistUi::NamePrompt { input, .. } = &mut self.playlist_ui {
+            input.insert_str(text.trim());
+            return;
+        }
         if self.focus == Focus::Search && !self.help {
-            let text = text.replace(['\r', '\n'], " ");
             self.input.insert_str(text.trim());
         }
     }
@@ -280,6 +335,12 @@ impl App {
             ) {
                 self.help = false;
             }
+            return;
+        }
+
+        // Playlist popups swallow all keys except the global quit above.
+        if !matches!(self.playlist_ui, PlaylistUi::None) {
+            self.handle_playlist_key(key);
             return;
         }
 
@@ -354,6 +415,9 @@ impl App {
             KeyCode::Char('Q') => self.sort_by_quality(),
             KeyCode::Char('T') => self.sort_by_duration(),
             KeyCode::Char('W') => self.toggle_high_quality_only(),
+            KeyCode::Char('S') => self.open_save_playlist_prompt(),
+            KeyCode::Char('s') => self.open_add_to_playlist(),
+            KeyCode::Char('o') => self.open_playlist_picker(),
             _ => {}
         }
     }
@@ -394,6 +458,8 @@ impl App {
             KeyCode::Char('Q') => self.sort_by_quality(),
             KeyCode::Char('T') => self.sort_by_duration(),
             KeyCode::Char('W') => self.toggle_high_quality_only(),
+            KeyCode::Char('S') => self.open_save_playlist_prompt(),
+            KeyCode::Char('o') => self.open_playlist_picker(),
             _ => {}
         }
     }
@@ -1064,6 +1130,377 @@ impl App {
             self.set_quality_preference(QualityFilter::High);
         }
     }
+
+    // ----- Playlists ------------------------------------------------------
+
+    /// `S`: prompt for a name and save the current queue as a playlist.
+    pub fn open_save_playlist_prompt(&mut self) {
+        if self.queue.is_empty() {
+            self.set_status("Queue is empty — nothing to save.", true);
+            return;
+        }
+        self.playlist_ui = PlaylistUi::NamePrompt {
+            action: NameAction::SaveQueue,
+            input: TextInput::default(),
+        };
+    }
+
+    /// `o`: browse saved playlists.
+    pub fn open_playlist_picker(&mut self) {
+        let names = playlist::list(&self.playlist_dir);
+        self.playlist_ui = PlaylistUi::Picker {
+            mode: PickerMode::Open,
+            level: PickerLevel::Playlists,
+            selected: 0,
+            names,
+        };
+    }
+
+    /// `s` (results view): pick a playlist to add the selected result to.
+    pub fn open_add_to_playlist(&mut self) {
+        let Some(track) = self.results.get(self.result_selected).cloned() else {
+            self.set_status("No track selected.", true);
+            return;
+        };
+        let names = playlist::list(&self.playlist_dir);
+        self.playlist_ui = PlaylistUi::Picker {
+            mode: PickerMode::AddTo { track },
+            level: PickerLevel::Playlists,
+            selected: 0,
+            names,
+        };
+    }
+
+    fn handle_playlist_key(&mut self, key: KeyEvent) {
+        if matches!(self.playlist_ui, PlaylistUi::NamePrompt { .. }) {
+            self.handle_playlist_name_key(key);
+        } else if matches!(self.playlist_ui, PlaylistUi::Picker { .. }) {
+            self.handle_playlist_picker_key(key);
+        }
+    }
+
+    fn handle_playlist_name_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Enter => {
+                let (action, name) = match &self.playlist_ui {
+                    PlaylistUi::NamePrompt { action, input } => (action.clone(), input.value()),
+                    _ => return,
+                };
+                self.confirm_playlist_name(&action, &name);
+            }
+            KeyCode::Esc => self.playlist_ui = PlaylistUi::None,
+            KeyCode::Backspace => {
+                if let PlaylistUi::NamePrompt { input, .. } = &mut self.playlist_ui {
+                    input.backspace();
+                }
+            }
+            KeyCode::Delete => {
+                if let PlaylistUi::NamePrompt { input, .. } = &mut self.playlist_ui {
+                    input.delete();
+                }
+            }
+            KeyCode::Left => {
+                if let PlaylistUi::NamePrompt { input, .. } = &mut self.playlist_ui {
+                    input.left();
+                }
+            }
+            KeyCode::Right => {
+                if let PlaylistUi::NamePrompt { input, .. } = &mut self.playlist_ui {
+                    input.right();
+                }
+            }
+            KeyCode::Home => {
+                if let PlaylistUi::NamePrompt { input, .. } = &mut self.playlist_ui {
+                    input.home();
+                }
+            }
+            KeyCode::End => {
+                if let PlaylistUi::NamePrompt { input, .. } = &mut self.playlist_ui {
+                    input.end();
+                }
+            }
+            KeyCode::Char(ch) if ctrl => {
+                if let PlaylistUi::NamePrompt { input, .. } = &mut self.playlist_ui {
+                    match ch.to_ascii_lowercase() {
+                        'u' => input.clear(),
+                        'w' => input.delete_word(),
+                        'a' => input.home(),
+                        'e' => input.end(),
+                        _ => {}
+                    }
+                }
+            }
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::ALT) => {
+                if let PlaylistUi::NamePrompt { input, .. } = &mut self.playlist_ui {
+                    input.insert(ch);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn confirm_playlist_name(&mut self, action: &NameAction, raw_name: &str) {
+        let name = playlist::sanitize_name(raw_name);
+        if name.is_empty() {
+            self.set_status("Playlist name is empty.", true);
+            return;
+        }
+
+        let result = match action {
+            NameAction::SaveQueue => playlist::save(&self.playlist_dir, &name, &self.queue)
+                .map(|_| format!("Saved \"{name}\" ({} tracks)", self.queue.len())),
+            NameAction::Rename { old } => {
+                playlist::rename(&self.playlist_dir, old, &name).map(|renamed| {
+                    if renamed {
+                        format!("Renamed to \"{name}\"")
+                    } else {
+                        "Playlist not found.".to_string()
+                    }
+                })
+            }
+        };
+
+        match result {
+            Ok(message) => {
+                self.playlist_ui = PlaylistUi::None;
+                self.set_status(message, false);
+            }
+            Err(error) => self.set_status(format!("Could not save playlist: {error:#}"), true),
+        }
+    }
+
+    fn handle_playlist_picker_key(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return; // only the global Ctrl+C/Ctrl+Q quit applies here
+        }
+
+        let PlaylistUi::Picker {
+            mode,
+            level,
+            selected,
+            names,
+        } = &mut self.playlist_ui
+        else {
+            return;
+        };
+
+        // Clone what actions need so the borrow on `self.playlist_ui` ends
+        // before App methods are called.
+        let mode = mode.clone();
+        let level = level.clone();
+        let index = *selected;
+        let playlist_name = match &level {
+            PickerLevel::Playlists => names.get(index).cloned(),
+            PickerLevel::Tracks { playlist, .. } => Some(playlist.clone()),
+        };
+
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                if !names.is_empty() {
+                    *selected = (*selected + 1).min(names.len() - 1);
+                }
+            }
+            KeyCode::Home | KeyCode::Char('g') => *selected = 0,
+            KeyCode::End | KeyCode::Char('G') => {
+                if !names.is_empty() {
+                    *selected = names.len() - 1;
+                }
+            }
+            KeyCode::Esc => {
+                if matches!(level, PickerLevel::Tracks { .. }) {
+                    if let PlaylistUi::Picker {
+                        level, selected, ..
+                    } = &mut self.playlist_ui
+                    {
+                        *level = PickerLevel::Playlists;
+                        *selected = 0;
+                    }
+                } else {
+                    self.playlist_ui = PlaylistUi::None;
+                }
+            }
+            KeyCode::Enter => match (&mode, &level, playlist_name) {
+                (PickerMode::Open, PickerLevel::Playlists, Some(name)) => {
+                    self.load_playlist(&name, 0);
+                }
+                (PickerMode::AddTo { track }, PickerLevel::Playlists, Some(name)) => {
+                    self.add_track_to_playlist(&name, track);
+                }
+                (PickerMode::Open, PickerLevel::Tracks { .. }, Some(name)) => {
+                    self.load_playlist(&name, index);
+                }
+                _ => {}
+            },
+            KeyCode::Char('a')
+                if matches!(level, PickerLevel::Playlists) && matches!(mode, PickerMode::Open) =>
+            {
+                if let Some(name) = playlist_name {
+                    self.append_playlist(&name);
+                }
+            }
+            KeyCode::Char('e')
+                if matches!(level, PickerLevel::Playlists) && matches!(mode, PickerMode::Open) =>
+            {
+                if let Some(name) = playlist_name {
+                    self.open_playlist_tracks(&name);
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Delete => match &level {
+                PickerLevel::Playlists if matches!(mode, PickerMode::Open) => {
+                    if let Some(name) = playlist_name {
+                        self.delete_playlist(&name);
+                    }
+                }
+                PickerLevel::Tracks { .. } => {
+                    if let Some(name) = playlist_name {
+                        self.remove_track_from_playlist(&name, index);
+                    }
+                }
+                _ => {}
+            },
+            KeyCode::Char('r')
+                if matches!(level, PickerLevel::Playlists) && matches!(mode, PickerMode::Open) =>
+            {
+                if let Some(name) = playlist_name {
+                    self.open_rename_prompt(&name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn refresh_picker(&mut self) {
+        if let PlaylistUi::Picker {
+            names, selected, ..
+        } = &mut self.playlist_ui
+        {
+            *names = playlist::list(&self.playlist_dir);
+            *selected = if names.is_empty() {
+                0
+            } else {
+                (*selected).min(names.len() - 1)
+            };
+        }
+    }
+
+    fn open_rename_prompt(&mut self, old: &str) {
+        let mut input = TextInput::default();
+        input.insert_str(old);
+        self.playlist_ui = PlaylistUi::NamePrompt {
+            action: NameAction::Rename {
+                old: old.to_string(),
+            },
+            input,
+        };
+    }
+
+    fn open_playlist_tracks(&mut self, name: &str) {
+        let tracks = match playlist::load(&self.playlist_dir, name) {
+            Ok(Some(Playlist { tracks, .. })) => tracks,
+            _ => Vec::new(),
+        };
+        self.playlist_ui = PlaylistUi::Picker {
+            mode: PickerMode::Open,
+            level: PickerLevel::Tracks {
+                playlist: playlist::sanitize_name(name),
+                tracks,
+            },
+            selected: 0,
+            names: playlist::list(&self.playlist_dir),
+        };
+    }
+
+    fn load_playlist(&mut self, name: &str, start: usize) {
+        match playlist::load(&self.playlist_dir, name) {
+            Ok(Some(Playlist { tracks, .. })) if !tracks.is_empty() => {
+                let start = start.min(tracks.len() - 1);
+                self.queue = tracks;
+                self.queue_selected = start;
+                self.playlist_ui = PlaylistUi::None;
+                self.set_status(format!("Playing \"{name}\""), false);
+                self.play_queue_index(start);
+            }
+            Ok(Some(_)) => self.set_status("Playlist is empty.", true),
+            Ok(None) => self.set_status("Playlist not found.", true),
+            Err(error) => self.set_status(format!("Could not load playlist: {error:#}"), true),
+        }
+    }
+
+    fn append_playlist(&mut self, name: &str) {
+        match playlist::load(&self.playlist_dir, name) {
+            Ok(Some(Playlist { tracks, .. })) if !tracks.is_empty() => {
+                let added = tracks.len();
+                self.queue.extend(tracks);
+                self.playlist_ui = PlaylistUi::None;
+                self.set_status(format!("Appended {added} tracks from \"{name}\""), false);
+            }
+            Ok(Some(_)) => self.set_status("Playlist is empty.", true),
+            Ok(None) => self.set_status("Playlist not found.", true),
+            Err(error) => self.set_status(format!("Could not load playlist: {error:#}"), true),
+        }
+    }
+
+    fn add_track_to_playlist(&mut self, name: &str, track: &Track) {
+        match playlist::add_track(&self.playlist_dir, name, track) {
+            Ok(true) => {
+                self.playlist_ui = PlaylistUi::None;
+                self.set_status(
+                    format!("Added \"{}\" to \"{name}\"", truncate_title(track)),
+                    false,
+                );
+            }
+            Ok(false) => self.set_status("Playlist not found.", true),
+            Err(error) => self.set_status(format!("Could not update playlist: {error:#}"), true),
+        }
+    }
+
+    fn delete_playlist(&mut self, name: &str) {
+        match playlist::delete(&self.playlist_dir, name) {
+            Ok(true) => {
+                self.set_status(format!("Deleted \"{name}\""), false);
+                self.refresh_picker();
+            }
+            Ok(false) => self.set_status("Playlist not found.", true),
+            Err(error) => self.set_status(format!("Could not delete playlist: {error:#}"), true),
+        }
+    }
+
+    fn remove_track_from_playlist(&mut self, name: &str, index: usize) {
+        match playlist::remove_track(&self.playlist_dir, name, index) {
+            Ok(true) => {
+                if let PlaylistUi::Picker {
+                    level: PickerLevel::Tracks { tracks, .. },
+                    selected,
+                    ..
+                } = &mut self.playlist_ui
+                {
+                    if index < tracks.len() {
+                        tracks.remove(index);
+                    }
+                    *selected = if tracks.is_empty() {
+                        0
+                    } else {
+                        (*selected).min(tracks.len() - 1)
+                    };
+                }
+                self.set_status(format!("Removed track from \"{name}\""), false);
+            }
+            Ok(false) => self.set_status("Track not found.", true),
+            Err(error) => self.set_status(format!("Could not update playlist: {error:#}"), true),
+        }
+    }
+}
+
+fn truncate_title(track: &Track) -> String {
+    let title = &track.title;
+    if title.chars().count() > 40 {
+        let truncated: String = title.chars().take(37).collect();
+        format!("{truncated}...")
+    } else {
+        title.clone()
+    }
 }
 
 #[cfg(test)]
@@ -1235,5 +1672,195 @@ mod tests {
         app.apply_quality_filter();
         assert_eq!(app.results.len(), 3);
         assert_eq!(app.all_results.len(), 3);
+    }
+
+    fn test_app_with_playlist_dir(tag: &str) -> (App, std::path::PathBuf) {
+        let mut app = test_app();
+        let dir =
+            std::env::temp_dir().join(format!("tuimu-app-playlists-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        app.playlist_dir = dir.clone();
+        (app, dir)
+    }
+
+    #[test]
+    fn save_queue_prompt_saves_playlist() {
+        let (mut app, dir) = test_app_with_playlist_dir("save");
+        app.queue = vec![track(Quality::High), track(Quality::Low)];
+
+        app.focus = Focus::Results;
+        app.handle_key(key(KeyCode::Char('S')));
+        assert!(matches!(app.playlist_ui, PlaylistUi::NamePrompt { .. }));
+
+        for ch in "Road Trip".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+
+        assert!(matches!(app.playlist_ui, PlaylistUi::None));
+        assert!(!app.status_is_error);
+        let saved = playlist::load(&dir, "Road Trip")
+            .expect("load")
+            .expect("saved");
+        assert_eq!(saved.tracks.len(), 2);
+    }
+
+    #[test]
+    fn save_prompt_rejects_empty_queue() {
+        let (mut app, _dir) = test_app_with_playlist_dir("empty-queue");
+        app.focus = Focus::Results;
+        app.handle_key(key(KeyCode::Char('S')));
+        assert!(matches!(app.playlist_ui, PlaylistUi::None));
+        assert!(app.status_is_error);
+    }
+
+    #[test]
+    fn playlist_prompt_keys_do_not_reach_search() {
+        let (mut app, _dir) = test_app_with_playlist_dir("routing");
+        app.queue = vec![track(Quality::High)];
+        app.focus = Focus::Results;
+        app.handle_key(key(KeyCode::Char('S')));
+        for ch in "mix".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        assert!(app.input.is_empty());
+        assert!(matches!(
+            &app.playlist_ui,
+            PlaylistUi::NamePrompt { input, .. } if input.value() == "mix"
+        ));
+
+        // Global quit still works while the prompt is open.
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn add_to_playlist_picker_adds_track() {
+        let (mut app, dir) = test_app_with_playlist_dir("add");
+        playlist::save(&dir, "favs", &[]).expect("save");
+        app.results = vec![track(Quality::High)];
+        app.result_selected = 0;
+
+        app.focus = Focus::Results;
+        app.handle_key(key(KeyCode::Char('s')));
+        assert!(matches!(
+            &app.playlist_ui,
+            PlaylistUi::Picker { mode: PickerMode::AddTo { .. }, names, .. } if names.len() == 1
+        ));
+
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(app.playlist_ui, PlaylistUi::None));
+        assert!(!app.status_is_error);
+        let saved = playlist::load(&dir, "favs").expect("load").expect("saved");
+        assert_eq!(saved.tracks.len(), 1);
+    }
+
+    #[test]
+    fn picker_navigates_and_closes() {
+        let (mut app, dir) = test_app_with_playlist_dir("navigate");
+        playlist::save(&dir, "a-mix", &[track(Quality::High)]).expect("save");
+        playlist::save(&dir, "b-mix", &[track(Quality::Low)]).expect("save");
+
+        app.focus = Focus::Queue;
+        app.handle_key(key(KeyCode::Char('o')));
+        assert!(matches!(
+            &app.playlist_ui,
+            PlaylistUi::Picker { names, selected: 0, .. } if names.len() == 2
+        ));
+
+        app.handle_key(key(KeyCode::Char('j')));
+        assert!(matches!(
+            &app.playlist_ui,
+            PlaylistUi::Picker { selected: 1, .. }
+        ));
+
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(app.playlist_ui, PlaylistUi::None));
+    }
+
+    #[test]
+    fn picker_deletes_playlist() {
+        let (mut app, dir) = test_app_with_playlist_dir("delete");
+        playlist::save(&dir, "gone", &[track(Quality::High)]).expect("save");
+
+        app.focus = Focus::Queue;
+        app.handle_key(key(KeyCode::Char('o')));
+        app.handle_key(key(KeyCode::Char('d')));
+
+        assert!(matches!(
+            &app.playlist_ui,
+            PlaylistUi::Picker { names, .. } if names.is_empty()
+        ));
+        assert!(playlist::load(&dir, "gone").expect("load").is_none());
+    }
+
+    #[test]
+    fn picker_loads_playlist_into_queue() {
+        let (mut app, dir) = test_app_with_playlist_dir("load");
+        playlist::save(&dir, "mix", &[track(Quality::High), track(Quality::Low)]).expect("save");
+
+        app.focus = Focus::Queue;
+        app.handle_key(key(KeyCode::Char('o')));
+        app.handle_key(key(KeyCode::Enter));
+
+        assert!(matches!(app.playlist_ui, PlaylistUi::None));
+        assert_eq!(app.queue.len(), 2);
+        assert_eq!(app.current, Some(0));
+        assert!(!app.status_is_error);
+    }
+
+    #[test]
+    fn picker_edits_and_removes_tracks() {
+        let (mut app, dir) = test_app_with_playlist_dir("edit");
+        playlist::save(&dir, "mix", &[track(Quality::High), track(Quality::Low)]).expect("save");
+
+        app.focus = Focus::Queue;
+        app.handle_key(key(KeyCode::Char('o')));
+        app.handle_key(key(KeyCode::Char('e')));
+        assert!(matches!(
+            &app.playlist_ui,
+            PlaylistUi::Picker { level: PickerLevel::Tracks { tracks, .. }, .. } if tracks.len() == 2
+        ));
+
+        app.handle_key(key(KeyCode::Char('d')));
+        let saved = playlist::load(&dir, "mix").expect("load").expect("saved");
+        assert_eq!(saved.tracks.len(), 1);
+
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(
+            &app.playlist_ui,
+            PlaylistUi::Picker {
+                level: PickerLevel::Playlists,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rename_prompt_renames_playlist() {
+        let (mut app, dir) = test_app_with_playlist_dir("rename");
+        playlist::save(&dir, "old", &[track(Quality::High)]).expect("save");
+
+        app.focus = Focus::Queue;
+        app.handle_key(key(KeyCode::Char('o')));
+        app.handle_key(key(KeyCode::Char('r')));
+        // The prompt is prefilled with "old"; replace it with "new".
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        for ch in "new".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+
+        assert!(matches!(app.playlist_ui, PlaylistUi::None));
+        assert!(playlist::load(&dir, "old").expect("load").is_none());
+        assert_eq!(
+            playlist::load(&dir, "new")
+                .expect("load")
+                .expect("saved")
+                .tracks
+                .len(),
+            1
+        );
     }
 }

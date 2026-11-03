@@ -4,8 +4,6 @@
 //! Tracks are stored with their source page URL; audio is re-extracted with
 //! yt-dlp at play time, so saved playlists stay valid across sessions.
 
-#![allow(dead_code)] // wired into the UI in the next commit
-
 use std::fs;
 use std::path::PathBuf;
 
@@ -17,7 +15,6 @@ use crate::model::{Quality, Source, Track};
 const NAME_MAX_CHARS: usize = 60;
 
 pub struct Playlist {
-    pub name: String,
     pub tracks: Vec<Track>,
 }
 
@@ -59,16 +56,8 @@ pub fn sanitize_name(name: &str) -> String {
     sanitized.chars().take(NAME_MAX_CHARS).collect()
 }
 
-pub fn is_valid_name(name: &str) -> bool {
-    !sanitize_name(name).is_empty()
-}
-
 /// List saved playlist names, sorted alphabetically.
-pub fn list() -> Vec<String> {
-    list_at(&playlists_dir().unwrap_or_else(|_| PathBuf::from(".")))
-}
-
-fn list_at(dir: &std::path::Path) -> Vec<String> {
+pub fn list(dir: &std::path::Path) -> Vec<String> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -82,9 +71,8 @@ fn list_at(dir: &std::path::Path) -> Vec<String> {
 }
 
 /// Load a playlist by name. `Ok(None)` when it does not exist.
-pub fn load(name: &str) -> Result<Option<Playlist>> {
-    let dir = playlists_dir()?;
-    load_at(&dir, &sanitize_name(name))
+pub fn load(dir: &std::path::Path, name: &str) -> Result<Option<Playlist>> {
+    load_at(dir, &sanitize_name(name))
 }
 
 fn load_at(dir: &std::path::Path, sanitized: &str) -> Result<Option<Playlist>> {
@@ -105,16 +93,12 @@ fn load_at(dir: &std::path::Path, sanitized: &str) -> Result<Option<Playlist>> {
         .map(|items| items.iter().filter_map(track_from_json).collect())
         .unwrap_or_default();
 
-    Ok(Some(Playlist {
-        name: sanitized.to_string(),
-        tracks,
-    }))
+    Ok(Some(Playlist { tracks }))
 }
 
 /// Persist a playlist atomically (temp file + rename).
-pub fn save(name: &str, tracks: &[Track]) -> Result<()> {
-    let dir = playlists_dir()?;
-    save_at(&dir, &sanitize_name(name), tracks)
+pub fn save(dir: &std::path::Path, name: &str, tracks: &[Track]) -> Result<()> {
+    save_at(dir, &sanitize_name(name), tracks)
 }
 
 fn save_at(dir: &std::path::Path, sanitized: &str, tracks: &[Track]) -> Result<()> {
@@ -140,9 +124,8 @@ fn save_at(dir: &std::path::Path, sanitized: &str, tracks: &[Track]) -> Result<(
 }
 
 /// Delete a playlist. Returns `false` when it did not exist.
-pub fn delete(name: &str) -> Result<bool> {
-    let dir = playlists_dir()?;
-    delete_at(&dir, &sanitize_name(name))
+pub fn delete(dir: &std::path::Path, name: &str) -> Result<bool> {
+    delete_at(dir, &sanitize_name(name))
 }
 
 fn delete_at(dir: &std::path::Path, sanitized: &str) -> Result<bool> {
@@ -156,47 +139,44 @@ fn delete_at(dir: &std::path::Path, sanitized: &str) -> Result<bool> {
 
 /// Rename a playlist, preserving its tracks. Returns `false` when the old
 /// name does not exist or both names sanitize to the same file.
-pub fn rename(old: &str, new: &str) -> Result<bool> {
-    let dir = playlists_dir()?;
+pub fn rename(dir: &std::path::Path, old: &str, new: &str) -> Result<bool> {
     let old = sanitize_name(old);
     let new = sanitize_name(new);
     if old.is_empty() || new.is_empty() || old == new {
         return Ok(false);
     }
-    let Some(playlist) = load_at(&dir, &old)? else {
+    let Some(playlist) = load_at(dir, &old)? else {
         return Ok(false);
     };
-    save_at(&dir, &new, &playlist.tracks)?;
-    delete_at(&dir, &old)?;
+    save_at(dir, &new, &playlist.tracks)?;
+    delete_at(dir, &old)?;
     Ok(true)
 }
 
 /// Append a track to an existing playlist. Returns `false` when the playlist
 /// does not exist.
-pub fn add_track(name: &str, track: &Track) -> Result<bool> {
-    let dir = playlists_dir()?;
+pub fn add_track(dir: &std::path::Path, name: &str, track: &Track) -> Result<bool> {
     let sanitized = sanitize_name(name);
-    let Some(mut playlist) = load_at(&dir, &sanitized)? else {
+    let Some(mut playlist) = load_at(dir, &sanitized)? else {
         return Ok(false);
     };
     playlist.tracks.push(track.clone());
-    save_at(&dir, &sanitized, &playlist.tracks)?;
+    save_at(dir, &sanitized, &playlist.tracks)?;
     Ok(true)
 }
 
 /// Remove the track at `index` from a playlist. Returns `false` when the
 /// playlist or the index does not exist.
-pub fn remove_track(name: &str, index: usize) -> Result<bool> {
-    let dir = playlists_dir()?;
+pub fn remove_track(dir: &std::path::Path, name: &str, index: usize) -> Result<bool> {
     let sanitized = sanitize_name(name);
-    let Some(mut playlist) = load_at(&dir, &sanitized)? else {
+    let Some(mut playlist) = load_at(dir, &sanitized)? else {
         return Ok(false);
     };
     if index >= playlist.tracks.len() {
         return Ok(false);
     }
     playlist.tracks.remove(index);
-    save_at(&dir, &sanitized, &playlist.tracks)?;
+    save_at(dir, &sanitized, &playlist.tracks)?;
     Ok(true)
 }
 
@@ -319,9 +299,8 @@ mod tests {
     #[test]
     fn saves_and_loads_playlists() {
         let dir = test_dir("roundtrip");
-        save_at(&dir, "favorites", &[track("https://a/1")]).expect("save");
-        let playlist = load_at(&dir, "favorites").expect("load").expect("present");
-        assert_eq!(playlist.name, "favorites");
+        save(&dir, "favorites", &[track("https://a/1")]).expect("save");
+        let playlist = load(&dir, "favorites").expect("load").expect("present");
         assert_eq!(playlist.tracks.len(), 1);
         assert_eq!(playlist.tracks[0].url, "https://a/1");
         assert_eq!(playlist.tracks[0].source, Source::YouTube);
@@ -331,35 +310,35 @@ mod tests {
     #[test]
     fn missing_playlist_loads_none() {
         let dir = test_dir("missing");
-        assert!(load_at(&dir, "nope").expect("load").is_none());
+        assert!(load(&dir, "nope").expect("load").is_none());
     }
 
     #[test]
     fn lists_sorted_json_files_only() {
         let dir = test_dir("list");
-        save_at(&dir, "b-mix", &[track("https://a/1")]).expect("save");
-        save_at(&dir, "a-mix", &[track("https://a/2")]).expect("save");
+        save(&dir, "b-mix", &[track("https://a/1")]).expect("save");
+        save(&dir, "a-mix", &[track("https://a/2")]).expect("save");
         fs::write(dir.join("notes.txt"), "junk").expect("write");
-        assert_eq!(list_at(&dir), vec!["a-mix", "b-mix"]);
+        assert_eq!(list(&dir), vec!["a-mix", "b-mix"]);
     }
 
     #[test]
     fn deletes_and_reports_missing() {
         let dir = test_dir("delete");
-        save_at(&dir, "temp", &[track("https://a/1")]).expect("save");
-        assert!(delete_at(&dir, "temp").expect("delete"));
-        assert!(!delete_at(&dir, "temp").expect("delete again"));
+        save(&dir, "temp", &[track("https://a/1")]).expect("save");
+        assert!(delete(&dir, "temp").expect("delete"));
+        assert!(!delete(&dir, "temp").expect("delete again"));
     }
 
     #[test]
     fn renames_preserve_tracks() {
         let dir = test_dir("rename");
-        save_at(&dir, "old", &[track("https://a/1")]).expect("save");
-        let renamed = rename_at(&dir, "old", "new").expect("rename");
+        save(&dir, "old", &[track("https://a/1")]).expect("save");
+        let renamed = rename(&dir, "old", "new").expect("rename");
         assert!(renamed);
-        assert!(load_at(&dir, "old").expect("load").is_none());
+        assert!(load(&dir, "old").expect("load").is_none());
         assert_eq!(
-            load_at(&dir, "new")
+            load(&dir, "new")
                 .expect("load")
                 .expect("present")
                 .tracks
@@ -368,30 +347,16 @@ mod tests {
         );
     }
 
-    fn rename_at(dir: &std::path::Path, old: &str, new: &str) -> Result<bool> {
-        let old = sanitize_name(old);
-        let new = sanitize_name(new);
-        if old.is_empty() || new.is_empty() || old == new {
-            return Ok(false);
-        }
-        let Some(playlist) = load_at(dir, &old)? else {
-            return Ok(false);
-        };
-        save_at(dir, &new, &playlist.tracks)?;
-        delete_at(dir, &old)?;
-        Ok(true)
-    }
-
     #[test]
     fn adds_and_removes_tracks() {
         let dir = test_dir("mutate");
-        save_at(&dir, "mix", &[track("https://a/1")]).expect("save");
+        save(&dir, "mix", &[track("https://a/1")]).expect("save");
 
-        let mut playlist = load_at(&dir, "mix").expect("load").expect("present");
+        let mut playlist = load(&dir, "mix").expect("load").expect("present");
         playlist.tracks.push(track("https://a/2"));
-        save_at(&dir, "mix", &playlist.tracks).expect("save");
+        save(&dir, "mix", &playlist.tracks).expect("save");
         assert_eq!(
-            load_at(&dir, "mix")
+            load(&dir, "mix")
                 .expect("load")
                 .expect("present")
                 .tracks
@@ -400,8 +365,8 @@ mod tests {
         );
 
         playlist.tracks.remove(0);
-        save_at(&dir, "mix", &playlist.tracks).expect("save");
-        let playlist = load_at(&dir, "mix").expect("load").expect("present");
+        save(&dir, "mix", &playlist.tracks).expect("save");
+        let playlist = load(&dir, "mix").expect("load").expect("present");
         assert_eq!(playlist.tracks[0].url, "https://a/2");
     }
 
@@ -423,7 +388,7 @@ mod tests {
         )
         .expect("write");
 
-        let playlist = load_at(&dir, "damaged").expect("load").expect("present");
+        let playlist = load(&dir, "damaged").expect("load").expect("present");
         assert_eq!(playlist.tracks.len(), 2);
         assert_eq!(playlist.tracks[1].source, Source::Web);
         assert_eq!(playlist.tracks[1].quality, Quality::Medium);
@@ -434,8 +399,6 @@ mod tests {
         assert_eq!(sanitize_name("  Road Trip 24/7!! "), "Road Trip 24 7");
         assert_eq!(sanitize_name("../../etc/passwd"), "etc passwd");
         assert_eq!(sanitize_name("///"), "");
-        assert!(!is_valid_name("///"));
-        assert!(is_valid_name("Chill Beats"));
         let long = "x".repeat(200);
         assert_eq!(sanitize_name(&long).len(), NAME_MAX_CHARS);
     }
