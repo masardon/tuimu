@@ -179,17 +179,16 @@ fn fetch_search(query: &Query, duration: Option<f64>) -> Result<Option<Lyrics>> 
     let Some(json) = get_json_with_timeout(&format!("{}/search", API_ROOT), &params, 10)? else {
         return Ok(None);
     };
-    if let Some(results) = json.as_array() {
-        if let Some(best) = results
+    if let Some(results) = json.as_array()
+        && let Some(best) = results
             .iter()
             .filter_map(|item| {
                 lyrics_from_object_with_source(item, "LrcLib")
                     .map(|lyrics| (score(item, query, duration), lyrics))
             })
             .max_by(|left, right| left.0.total_cmp(&right.0))
-        {
-            return Ok(Some(best.1));
-        }
+    {
+        return Ok(Some(best.1));
     }
 
     Ok(None)
@@ -357,61 +356,52 @@ fn score(value: &Value, query: &Query, duration: Option<f64>) -> f64 {
     let mut score = 0.0;
 
     // Exact match on title gets highest score
-    if let Some(title) = value.get("trackName").and_then(Value::as_str) {
-        if title.to_lowercase() == query.title.to_lowercase() {
-            score += 100.0;
-        }
+    if let Some(title) = value.get("trackName").and_then(Value::as_str)
+        && title.to_lowercase() == query.title.to_lowercase()
+    {
+        score += 100.0;
     }
 
     // Exact match on artist gets high score
-    if let Some(artist) = value.get("artistName").and_then(Value::as_str) {
-        if artist.to_lowercase() == query.artist.to_lowercase() {
-            score += 50.0;
-        }
+    if let Some(artist) = value.get("artistName").and_then(Value::as_str)
+        && artist.to_lowercase() == query.artist.to_lowercase()
+    {
+        score += 50.0;
     }
 
     // Partial match on title gets medium score
-    if let Some(title) = value.get("trackName").and_then(Value::as_str) {
-        if title.to_lowercase().contains(&query.title.to_lowercase()) {
-            score += 20.0;
-        }
+    if let Some(title) = value.get("trackName").and_then(Value::as_str)
+        && title.to_lowercase().contains(&query.title.to_lowercase())
+    {
+        score += 20.0;
     }
 
     // Partial match on artist gets low score
-    if let Some(artist) = value.get("artistName").and_then(Value::as_str) {
-        if artist.to_lowercase().contains(&query.artist.to_lowercase()) {
-            score += 10.0;
-        }
+    if let Some(artist) = value.get("artistName").and_then(Value::as_str)
+        && artist.to_lowercase().contains(&query.artist.to_lowercase())
+    {
+        score += 10.0;
     }
 
     // Duration match gets additional score
-    if let Some(duration) = duration {
-        if let Some(track_duration) = value.get("duration").and_then(Value::as_f64) {
-            let diff = (track_duration - duration).abs();
-            if diff < 5.0 {
-                score += 5.0;
-            } else if diff < 10.0 {
-                score += 2.0;
-            }
+    if let Some(duration) = duration
+        && let Some(track_duration) = value.get("duration").and_then(Value::as_f64)
+    {
+        let diff = (track_duration - duration).abs();
+        if diff < 5.0 {
+            score += 5.0;
+        } else if diff < 10.0 {
+            score += 2.0;
         }
     }
 
     score
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct Query {
     artist: String,
     title: String,
-}
-
-impl Default for Query {
-    fn default() -> Self {
-        Self {
-            artist: String::new(),
-            title: String::new(),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::input::TextInput;
 use crate::lyrics::{self, Lyrics};
 use crate::model::{QualityFilter, RepeatMode, SearchSource, Track};
-use crate::mpv::{Mpv, MpvMessage};
+use crate::mpv::{Mpv, MpvMessage, Player};
 use crate::ytdlp::{self, Lookup, StreamInfo};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,12 +108,16 @@ pub struct App {
     lyrics_rx: Receiver<LyricsMessage>,
     lyrics_pending: HashSet<String>,
     lyrics_cache: HashMap<String, Result<Lyrics, String>>,
-    mpv: Mpv,
+    mpv: Box<dyn Player>,
     mpv_closed: bool,
 }
 
 impl App {
     pub fn new(mpv: Mpv, lyrics_enabled: bool) -> Self {
+        Self::with_player(Box::new(mpv), lyrics_enabled)
+    }
+
+    fn with_player(mpv: Box<dyn Player>, lyrics_enabled: bool) -> Self {
         let (search_tx, search_rx) = mpsc::channel();
         let (play_tx, play_rx) = mpsc::channel();
         let (lyrics_tx, lyrics_rx) = mpsc::channel();
@@ -637,14 +641,14 @@ impl App {
         if !self.lyrics.follow || self.lyrics.lines.is_none() {
             return;
         }
-        if let (Some(lines), Some(_current)) = (&self.lyrics.lines, self.current_track()) {
-            if let Some(line_index) = lines.current_line(self.player.position) {
-                let half = self.lyrics_scroll_height() / 2;
-                if line_index < self.lyrics.scroll {
-                    self.lyrics.scroll = line_index;
-                } else if line_index >= self.lyrics.scroll + half {
-                    self.lyrics.scroll = (line_index + 1).saturating_sub(half);
-                }
+        if let (Some(lines), Some(_current)) = (&self.lyrics.lines, self.current_track())
+            && let Some(line_index) = lines.current_line(self.player.position)
+        {
+            let half = self.lyrics_scroll_height() / 2;
+            if line_index < self.lyrics.scroll {
+                self.lyrics.scroll = line_index;
+            } else if line_index >= self.lyrics.scroll + half {
+                self.lyrics.scroll = (line_index + 1).saturating_sub(half);
             }
         }
     }
@@ -1085,7 +1089,7 @@ impl App {
 
     pub fn sort_by_quality(&mut self) {
         self.all_results
-            .sort_by(|a, b| b.quality_score().cmp(&a.quality_score()));
+            .sort_by_key(|track| std::cmp::Reverse(track.quality_score()));
         self.rebuild_filtered_results();
         self.set_status(
             "Results sorted by quality (highest first)".to_string(),
@@ -1116,5 +1120,120 @@ impl App {
         } else {
             self.set_quality_preference(QualityFilter::High);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Quality, Source};
+
+    struct FakePlayer;
+
+    impl Player for FakePlayer {
+        fn try_recv(&self) -> std::result::Result<MpvMessage, TryRecvError> {
+            Err(TryRecvError::Empty)
+        }
+
+        fn load(&mut self, _url: &str, _headers: &[(String, String)]) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn toggle_pause(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn seek_relative(&mut self, _seconds: f64) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_volume(&mut self, _volume: f64) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn stop(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn test_app() -> App {
+        App::with_player(Box::new(FakePlayer), true)
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn track(quality: Quality) -> Track {
+        Track {
+            title: "Song".into(),
+            artist: "Artist".into(),
+            duration: Some(180.0),
+            url: "https://example.com/a".into(),
+            source: Source::YouTube,
+            quality,
+        }
+    }
+
+    #[test]
+    fn search_box_types_shortcut_letters_as_text() {
+        let mut app = test_app();
+        for ch in ['q', '@', '#', '?', 'f'] {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        assert_eq!(app.input.value(), "q@#?f");
+        assert!(!app.should_quit);
+        assert!(!app.help);
+        assert!(!app.lyrics.open);
+        assert_eq!(app.source, SearchSource::YouTube);
+        assert_eq!(app.quality_filter, QualityFilter::All);
+    }
+
+    #[test]
+    fn ctrl_c_quits_from_search_box() {
+        let mut app = test_app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit);
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn q_quits_from_results_view() {
+        let mut app = test_app();
+        app.focus = Focus::Results;
+        app.handle_key(key(KeyCode::Char('q')));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn filter_shortcut_cycles_quality_filter_in_results_view() {
+        let mut app = test_app();
+        app.focus = Focus::Results;
+        app.handle_key(key(KeyCode::Char('f')));
+        assert_eq!(app.quality_filter, QualityFilter::Lossless);
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn quality_filter_narrows_view_without_dropping_results() {
+        let mut app = test_app();
+        app.all_results = vec![
+            track(Quality::Lossless),
+            track(Quality::High),
+            track(Quality::Medium),
+        ];
+        app.apply_quality_filter();
+        assert_eq!(app.results.len(), 3);
+
+        app.quality_filter = QualityFilter::High;
+        app.apply_quality_filter();
+        assert_eq!(app.results.len(), 2);
+        assert_eq!(app.all_results.len(), 3);
+
+        app.cycle_quality_filter();
+        assert_eq!(app.quality_filter, QualityFilter::Medium);
+        app.apply_quality_filter();
+        assert_eq!(app.results.len(), 3);
+        assert_eq!(app.all_results.len(), 3);
     }
 }

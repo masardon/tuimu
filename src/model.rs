@@ -364,4 +364,22 @@ mod tests {
         // Test Low filter
         assert_eq!(QualityFilter::Low.label(), "Low");
     }
+
+    #[test]
+    fn quality_filter_matches_quality_levels() {
+        assert!(QualityFilter::All.matches(Quality::Low));
+        assert!(QualityFilter::All.matches(Quality::Lossless));
+
+        assert!(QualityFilter::Lossless.matches(Quality::Lossless));
+        assert!(!QualityFilter::Lossless.matches(Quality::High));
+
+        assert!(QualityFilter::High.matches(Quality::High));
+        assert!(QualityFilter::High.matches(Quality::Lossless));
+        assert!(!QualityFilter::High.matches(Quality::Medium));
+
+        assert!(QualityFilter::Medium.matches(Quality::Medium));
+        assert!(!QualityFilter::Medium.matches(Quality::Low));
+
+        assert!(QualityFilter::Low.matches(Quality::Low));
+    }
 }

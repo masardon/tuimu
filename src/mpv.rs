@@ -17,6 +17,43 @@ pub enum MpvMessage {
     Closed(String),
 }
 
+/// Playback engine operations used by the app, so the UI logic can be tested
+/// against a fake player instead of a real mpv process.
+pub trait Player {
+    fn try_recv(&self) -> Result<MpvMessage, TryRecvError>;
+    fn load(&mut self, url: &str, headers: &[(String, String)]) -> Result<()>;
+    fn toggle_pause(&mut self) -> Result<()>;
+    fn seek_relative(&mut self, seconds: f64) -> Result<()>;
+    fn set_volume(&mut self, volume: f64) -> Result<()>;
+    fn stop(&mut self) -> Result<()>;
+}
+
+impl Player for Mpv {
+    fn try_recv(&self) -> Result<MpvMessage, TryRecvError> {
+        Mpv::try_recv(self)
+    }
+
+    fn load(&mut self, url: &str, headers: &[(String, String)]) -> Result<()> {
+        Mpv::load(self, url, headers)
+    }
+
+    fn toggle_pause(&mut self) -> Result<()> {
+        Mpv::toggle_pause(self)
+    }
+
+    fn seek_relative(&mut self, seconds: f64) -> Result<()> {
+        Mpv::seek_relative(self, seconds)
+    }
+
+    fn set_volume(&mut self, volume: f64) -> Result<()> {
+        Mpv::set_volume(self, volume)
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        Mpv::stop(self)
+    }
+}
+
 struct MpvProcess {
     child: Child,
     stream: UnixStream,
