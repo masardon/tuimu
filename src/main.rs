@@ -5,6 +5,7 @@ mod model;
 mod mpv;
 mod playlist;
 mod ui;
+mod visualizer;
 mod ytdlp;
 
 use std::io::{self, Stdout};
