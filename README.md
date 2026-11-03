@@ -77,9 +77,9 @@ Or run in development: `cargo run`
 
 | Key | Action |
 |-----|--------|
-| **?** | Toggle help window |
+| **?** / **F1** | Toggle help window |
 | **@** | Switch between YouTube and SoundCloud |
-| **#** | Toggle lyrics window |
+| **#** / **F3** | Toggle lyrics window |
 | **Enter** | Play selected track / Start search |
 | **Esc** | Close lyrics/help / Go to results |
 | **Tab** | Switch focus (Search → Results → Queue) |
@@ -96,7 +96,13 @@ Or run in development: `cargo run`
 | **m** | Toggle mute |
 | **r** | Cycle repeat mode (off/all/one) |
 | **d** | Remove from queue |
-| **q** | Quit |
+| **J/K** | Move queue item down/up |
+| **f** | Cycle quality filter |
+| **W** | Toggle high-quality-only filter |
+| **Q** / **T** | Sort results by quality / duration |
+| **q** | Quit (outside the search box) |
+
+While the search box is focused, printable keys (including `q`, `@`, `#`, and `?`) are typed into the query. Switch focus with `Tab` to use those shortcuts.
 
 ### Basic Workflow
 
@@ -126,7 +132,7 @@ Or run in development: `cargo run`
    - Use `r` to cycle repeat modes
 
 5. **View lyrics**:
-   - Press `F3` to toggle the lyrics window
+   - Press `#` (or `F3`) to toggle the lyrics window
    - The lyrics window works even when no track is playing
    - Press `Esc` to close the lyrics window
 
@@ -225,7 +231,7 @@ rm -rf ~/.local/share/tuimu/
 - YouTube stream extraction uses yt-dlp's Android player client for reliability; the app relaunches mpv per source to send the required `Referer` headers without breaking playback.
 - All audio extraction goes through yt-dlp and is passed to mpv as a direct URL - no browser session or cookies are used.
 - The lyrics feature works with or without a currently playing track.
-- All special keys (?, @, #) work regardless of the current focus state.
+- Printable keys are captured by the search box while it is focused; shortcuts such as `?`, `@`, and `#` are active in the results and queue views.
 
 ## Troubleshooting
 

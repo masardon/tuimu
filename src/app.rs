@@ -187,8 +187,10 @@ impl App {
                 || self.current_track_url() == Some(&message.track_url)
             {
                 self.lyrics_pending.remove(&message.track_url);
-                self.lyrics_cache.insert(message.track_url.clone(), message.result.clone());
-                if self.lyrics.open && self.lyrics.track_url.as_deref() == Some(&message.track_url) {
+                self.lyrics_cache
+                    .insert(message.track_url.clone(), message.result.clone());
+                if self.lyrics.open && self.lyrics.track_url.as_deref() == Some(&message.track_url)
+                {
                     match &message.result {
                         Ok(lyrics) => {
                             self.lyrics.lines = Some(lyrics.clone());
@@ -210,7 +212,8 @@ impl App {
                 }
             } else {
                 self.lyrics_pending.remove(&message.track_url);
-                self.lyrics_cache.insert(message.track_url.clone(), message.result);
+                self.lyrics_cache
+                    .insert(message.track_url.clone(), message.result);
             }
         }
 
@@ -255,52 +258,29 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-        // Handle help key globally - highest priority
-        if key.code == KeyCode::Char('?') {
-            self.help = !self.help;
-            return;
-        }
-        
-        if key.code == KeyCode::Char('@') {
-            self.source = self.source.next();
-            self.set_status(format!("Search source: {}", self.source.label()), false);
-            return;
-        }
-        
-        if key.code == KeyCode::Char('#') {
-            self.toggle_lyrics();
-            return;
-        }
-        
-        if key.code == KeyCode::Char('q') {
-            self.cycle_quality_filter();
-            return;
-        }
-
-        // Handle Ctrl+C and Ctrl+Q for quitting
+        // Quitting is always available, even while editing or inside a popup.
         if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q')) {
             self.should_quit = true;
             return;
         }
 
-        // Handle help window
         if self.help {
             if matches!(
                 key.code,
-                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::F(1)
             ) {
                 self.help = false;
             }
             return;
         }
 
-        // Handle lyrics window
         if self.lyrics.open {
             self.handle_lyrics_key(key);
             return;
         }
 
-        // Handle focus-specific keys
+        // Printable keys are reserved for the search input while it is focused,
+        // so shortcuts such as `q`, `@`, and `#` must be typed there normally.
         match self.focus {
             Focus::Search => self.handle_search_key(key, ctrl),
             Focus::Results => self.handle_results_key(key),
@@ -312,6 +292,7 @@ impl App {
         match key.code {
             KeyCode::Enter => self.start_search(),
             KeyCode::Esc => self.focus = Focus::Results,
+            KeyCode::F(1) => self.help = true,
             KeyCode::Tab => self.focus = self.focus.next(),
             KeyCode::BackTab => self.focus = self.focus.previous(),
             KeyCode::Backspace => self.input.backspace(),
@@ -362,8 +343,10 @@ impl App {
             KeyCode::Char('-') => self.change_volume(-5.0),
             KeyCode::Left => self.seek(-5.0),
             KeyCode::Right => self.seek(5.0),
-            KeyCode::Char('?') => self.help = true,
-            KeyCode::Char('#') => self.toggle_lyrics(),
+            KeyCode::F(1) | KeyCode::Char('?') => self.help = true,
+            KeyCode::F(3) | KeyCode::Char('#') => self.toggle_lyrics(),
+            KeyCode::Char('@') => self.cycle_source(),
+            KeyCode::Char('f') => self.cycle_quality_filter(),
             KeyCode::Char('Q') => self.sort_by_quality(),
             KeyCode::Char('T') => self.sort_by_duration(),
             KeyCode::Char('W') => self.toggle_high_quality_only(),
@@ -400,8 +383,10 @@ impl App {
             KeyCode::Char('-') => self.change_volume(-5.0),
             KeyCode::Left => self.seek(-5.0),
             KeyCode::Right => self.seek(5.0),
-            KeyCode::Char('?') => self.help = true,
-            KeyCode::Char('#') => self.toggle_lyrics(),
+            KeyCode::F(1) | KeyCode::Char('?') => self.help = true,
+            KeyCode::F(3) | KeyCode::Char('#') => self.toggle_lyrics(),
+            KeyCode::Char('@') => self.cycle_source(),
+            KeyCode::Char('f') => self.cycle_quality_filter(),
             KeyCode::Char('Q') => self.sort_by_quality(),
             KeyCode::Char('T') => self.sort_by_duration(),
             KeyCode::Char('W') => self.toggle_high_quality_only(),
@@ -521,7 +506,10 @@ impl App {
 
     pub fn toggle_lyrics(&mut self) {
         if !self.lyrics_enabled {
-            self.set_status("Lyrics are disabled. Enable them in the configuration.", true);
+            self.set_status(
+                "Lyrics are disabled. Enable them in the configuration.",
+                true,
+            );
             return;
         }
 
@@ -536,14 +524,15 @@ impl App {
         self.lyrics.error = None;
         self.lyrics.scroll = 0;
         self.lyrics.follow = true;
-        
+
         if let Some(track) = self.current_track() {
             let track_url = track.url.clone();
             let title = track.title.clone();
             let artist = track.artist.clone();
             let duration = track.duration;
 
-            let needs_fetch = !self.lyrics_pending.contains(&track_url) && !self.lyrics_cache.contains_key(&track_url);
+            let needs_fetch = !self.lyrics_pending.contains(&track_url)
+                && !self.lyrics_cache.contains_key(&track_url);
             if needs_fetch {
                 self.lyrics_pending.insert(track_url.clone());
 
@@ -559,10 +548,7 @@ impl App {
                     .spawn(move || {
                         let result = lyrics::fetch(&artist, &title, duration)
                             .map_err(|error| format!("Could not fetch lyrics: {error:#}"));
-                        let _ = tx.send(LyricsMessage {
-                            track_url,
-                            result,
-                        });
+                        let _ = tx.send(LyricsMessage { track_url, result });
                     })
                     .unwrap();
             }
@@ -577,7 +563,7 @@ impl App {
     fn handle_lyrics_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Esc => {
+            KeyCode::Esc | KeyCode::Char('#') | KeyCode::Char('q') | KeyCode::F(3) => {
                 self.lyrics.open = false;
             }
             KeyCode::Char(' ') => {
@@ -591,7 +577,8 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if let Some(lines) = &self.lyrics.lines {
-                    self.lyrics.scroll = (self.lyrics.scroll + 1).min(lines.line_count().saturating_sub(1));
+                    self.lyrics.scroll =
+                        (self.lyrics.scroll + 1).min(lines.line_count().saturating_sub(1));
                 }
             }
             KeyCode::PageUp => {
@@ -599,7 +586,8 @@ impl App {
             }
             KeyCode::PageDown => {
                 if let Some(lines) = &self.lyrics.lines {
-                    self.lyrics.scroll = (self.lyrics.scroll + 5).min(lines.line_count().saturating_sub(1));
+                    self.lyrics.scroll =
+                        (self.lyrics.scroll + 5).min(lines.line_count().saturating_sub(1));
                 }
             }
             KeyCode::Home => {
@@ -904,6 +892,11 @@ impl App {
         }
     }
 
+    fn cycle_source(&mut self) {
+        self.source = self.source.next();
+        self.set_status(format!("Search source: {}", self.source.label()), false);
+    }
+
     fn cycle_repeat(&mut self) {
         self.repeat = self.repeat.next();
         self.set_status(format!("Repeat: {}", self.repeat.label()), false);
@@ -1020,11 +1013,12 @@ impl App {
     pub fn apply_quality_filter(&mut self) {
         let original_count = self.results.len();
         let before_filter = self.quality_filter;
-        
+
         // Optimize for large result sets
         if original_count > 1000 {
             // For very large sets, use a more efficient approach
-            let filtered: Vec<Track> = self.results
+            let filtered: Vec<Track> = self
+                .results
                 .iter()
                 .filter(|track| match self.quality_filter {
                     QualityFilter::All => true,
@@ -1046,11 +1040,11 @@ impl App {
                 QualityFilter::Low => track.quality >= Quality::Low,
             });
         }
-        
+
         if self.results.len() < original_count {
             let _filtered_count = original_count - self.results.len();
             let quality_name = before_filter.label();
-            
+
             self.set_status(
                 format!(
                     "Filtered: {} of {} tracks (quality: {})",
@@ -1058,20 +1052,17 @@ impl App {
                     original_count,
                     quality_name
                 ),
-                false
+                false,
             );
-            
+
             // Show detailed quality breakdown only for smaller sets
             if original_count <= 100 {
                 let quality_breakdown = self.get_quality_breakdown();
                 if !quality_breakdown.is_empty() {
-                    self.set_status(
-                        format!("Quality breakdown: {}", quality_breakdown),
-                        false
-                    );
+                    self.set_status(format!("Quality breakdown: {}", quality_breakdown), false);
                 }
             }
-            
+
             // Adjust selected index if it's out of bounds
             if self.result_selected >= self.results.len() {
                 self.result_selected = self.results.len().saturating_sub(1);
@@ -1081,14 +1072,14 @@ impl App {
 
     fn get_quality_breakdown(&self) -> String {
         let mut breakdown = std::collections::HashMap::new();
-        
+
         for track in &self.results {
             *breakdown.entry(track.quality).or_insert(0) += 1;
         }
-        
+
         let mut breakdown: Vec<_> = breakdown.into_iter().collect();
         breakdown.sort_by(|a, b| b.0.cmp(&a.0));
-        
+
         breakdown
             .into_iter()
             .map(|(quality, count)| format!("{}: {}", quality.label(), count))
@@ -1113,13 +1104,19 @@ impl App {
     }
 
     pub fn sort_by_quality(&mut self) {
-        self.results.sort_by(|a, b| b.quality_score().cmp(&a.quality_score()));
-        self.set_status("Results sorted by quality (highest first)".to_string(), false);
+        self.results
+            .sort_by(|a, b| b.quality_score().cmp(&a.quality_score()));
+        self.set_status(
+            "Results sorted by quality (highest first)".to_string(),
+            false,
+        );
     }
 
     pub fn sort_by_duration(&mut self) {
         self.results.sort_by(|a, b| {
-            a.duration.unwrap_or(0.0).total_cmp(&b.duration.unwrap_or(0.0))
+            a.duration
+                .unwrap_or(0.0)
+                .total_cmp(&b.duration.unwrap_or(0.0))
         });
         self.set_status("Results sorted by duration".to_string(), false);
     }
@@ -1129,12 +1126,14 @@ impl App {
         self.apply_quality_filter();
         self.set_status(
             format!("Quality preference set to {}", quality.label()),
-            false
+            false,
         );
     }
 
     pub fn toggle_high_quality_only(&mut self) {
-        if self.quality_filter == QualityFilter::High || self.quality_filter == QualityFilter::Lossless {
+        if self.quality_filter == QualityFilter::High
+            || self.quality_filter == QualityFilter::Lossless
+        {
             self.set_quality_preference(QualityFilter::All);
         } else {
             self.set_quality_preference(QualityFilter::High);

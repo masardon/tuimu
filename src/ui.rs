@@ -202,7 +202,7 @@ fn result_row(index: usize, track: &Track, is_current: bool) -> Row<'static> {
         Quality::High => Style::default().fg(Color::Green),
         Quality::Lossless => Style::default().fg(Color::Cyan),
     };
-    
+
     Row::new(vec![
         Cell::from(format!("{marker:>2}")).style(Style::default().fg(GREEN)),
         Cell::from(track.source.badge()).style(Style::default().fg(source_color(track.source))),
@@ -292,7 +292,8 @@ fn draw_queue(frame: &mut Frame, app: &App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(
-            Row::new(["", "#", "TITLE", "ARTIST", "TIME", "QUALITY"]).style(Style::default().fg(MUTED).bold()),
+            Row::new(["", "#", "TITLE", "ARTIST", "TIME", "QUALITY"])
+                .style(Style::default().fg(MUTED).bold()),
         )
         .column_spacing(1)
         .row_highlight_style(highlight_style(focused))
@@ -409,7 +410,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         spans.push(Span::raw(" "));
     }
-    
+
     // Add quality filter indicator
     if app.quality_filter != crate::model::QualityFilter::All {
         spans.push(Span::styled(
@@ -417,7 +418,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::Cyan),
         ));
     }
-    
+
     let color = if app.status_is_error {
         RED
     } else if loading {
@@ -436,13 +437,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("Esc", "results"),
             ("Tab", "next"),
             ("Ctrl+U", "clear"),
-            ("@", "source"),
-            ("#", "lyrics"),
-            ("q", "quality filter"),
-            ("Q", "sort by quality"),
-            ("T", "sort by duration"),
-            ("W", "toggle high quality"),
-            ("?", "help"),
+            ("F1", "help"),
             ("Ctrl+C", "quit"),
         ],
         Focus::Results => &[
@@ -453,14 +448,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("n/p", "next/prev"),
             ("←/→", "seek"),
             ("+/-", "volume"),
-            ("/", "search"),
-            ("Tab", "queue"),
+            ("f", "filter"),
+            ("@", "source"),
             ("#", "lyrics"),
-            ("q", "quality filter"),
-            ("Q", "sort by quality"),
-            ("T", "sort by duration"),
-            ("W", "toggle high quality"),
             ("?", "help"),
+            ("q", "quit"),
         ],
         Focus::Queue => &[
             ("Enter", "play"),
@@ -469,9 +461,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("Space", "pause"),
             ("n/p", "next/prev"),
             ("r", "repeat"),
-            ("/", "search"),
-            ("Tab", "search"),
-            ("F3", "lyrics"),
+            ("f", "filter"),
+            ("#", "lyrics"),
             ("?", "help"),
             ("q", "quit"),
         ],
@@ -538,7 +529,10 @@ fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect) {
         vec![Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled("✗", Style::default().fg(RED)),
-            Span::styled(format!(" Error: {}", error), Style::default().fg(Color::White)),
+            Span::styled(
+                format!(" Error: {}", error),
+                Style::default().fg(Color::White),
+            ),
         ])]
     } else if app.lyrics.instrumental {
         vec![Line::from(vec![
@@ -557,7 +551,8 @@ fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect) {
         let start = 5; // app.lyrics_scroll_height() / 2;
         let visible = 10; // app.lyrics_scroll_height();
         let scroll_start = app.lyrics.scroll.saturating_sub(start);
-        let scroll_end = (scroll_start + visible).min(lines.synced.as_ref().map_or(0, |lines| lines.len()));
+        let scroll_end =
+            (scroll_start + visible).min(lines.synced.as_ref().map_or(0, |lines| lines.len()));
 
         if scroll_start > 0 {
             content.push(Line::from(vec![
@@ -571,7 +566,12 @@ fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect) {
                 let line_index = scroll_start + index;
                 let is_current = app.lyrics.follow
                     && app.current_track().is_some()
-                    && app.lyrics.lines.as_ref().and_then(|l| l.current_line(app.player.position)) == Some(line_index);
+                    && app
+                        .lyrics
+                        .lines
+                        .as_ref()
+                        .and_then(|l| l.current_line(app.player.position))
+                        == Some(line_index);
                 let prefix = if is_current {
                     Span::styled("▶ ", Style::default().fg(GREEN).bold())
                 } else {
@@ -697,6 +697,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_line("Shift+Tab", "cycle backwards"),
         help_line("/ or i", "edit search"),
         help_line("Esc", "return to search"),
+        help_line("F1 / ?", "toggle this help"),
     ];
     let right = vec![
         section("QUEUE & SEARCH"),
@@ -705,11 +706,15 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_line("J / K", "move queue item down / up"),
         help_line("g / G", "jump to first / last"),
         help_line("@", "switch YouTube / SoundCloud"),
-        help_line("q", "quality filter"),
-        help_line("#", "toggle lyrics"),
+        help_line("q", "quit"),
+        Line::from(Span::raw("")),
+        section("QUALITY"),
+        help_line("f", "cycle quality filter"),
+        help_line("W", "toggle high quality only"),
+        help_line("Q / T", "sort by quality / duration"),
         Line::from(Span::raw("")),
         section("LYRICS"),
-        help_line("#", "show/hide lyrics"),
+        help_line("# / F3", "show/hide lyrics"),
         help_line("Space", "auto-follow on/off"),
         help_line("j / k", "scroll up/down"),
         help_line("PageUp/Down", "scroll page"),
