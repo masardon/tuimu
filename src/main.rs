@@ -41,6 +41,9 @@ fn run() -> Result<()> {
     if args.no_lyrics {
         println!("tuimu: Lyrics fetching disabled");
     }
+    if args.no_visualizer {
+        println!("tuimu: Visualizer disabled");
+    }
 
     ytdlp::check_dependencies()?;
     let mpv = Mpv::spawn().context("could not start the mpv playback engine")?;
@@ -62,7 +65,7 @@ fn run() -> Result<()> {
     let mut terminal = init_terminal().context("could not initialize the terminal")?;
     install_panic_hook();
 
-    let mut app = App::new(mpv, !args.no_lyrics, true);
+    let mut app = App::new(mpv, !args.no_lyrics, !args.no_visualizer);
     if let Some(tracks) = startup_playlist {
         app.start_with_tracks(tracks);
     }
@@ -152,4 +155,7 @@ struct Args {
 
     #[arg(short, long, value_name = "NAME", help = "Start with a saved playlist")]
     playlist: Option<String>,
+
+    #[arg(long, help = "Disable the audio visualizer")]
+    no_visualizer: bool,
 }

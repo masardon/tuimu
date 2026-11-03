@@ -14,6 +14,7 @@ No accounts, no logins, no paid APIs.
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) - finds and extracts audio
 - [mpv](https://mpv.io/) - plays audio over JSON IPC
 - [curl](https://curl.se/) - used for lyrics lookups and optional Spotify track metadata lookup
+- PulseAudio or PipeWire (`parec`) - optional, only needed for the audio visualizer
 
 ## Install
 
@@ -83,6 +84,7 @@ Or run in development: `cargo run`
 | **S** | Save the current queue as a playlist |
 | **s** | Add the selected result to a playlist |
 | **o** | Browse saved playlists |
+| **v** | Show/hide the visualizer |
 | **Enter** | Play selected track / Start search |
 | **Esc** | Close help / Go to results |
 | **Tab** | Switch focus (Search → Results → Queue) |
@@ -155,6 +157,11 @@ While the search box is focused, printable keys (including `q`, `@`, `#`, and `?
 - Start directly with one: `tuimu --playlist "name"`
 - Playlists are stored as JSON under `~/.local/share/tuimu/playlists/` (or `$XDG_DATA_HOME/tuimu/playlists/`) and keep each track's source URL, so they work across sessions
 
+### Visualizer
+- Press `v` to toggle the spectrum panel; with the lyrics panel visible it occupies the bottom quarter of the right column
+- Audio is tapped from the default output monitor via `parec` (PulseAudio or PipeWire-pulse), so it reflects whatever the desktop is playing
+- Without a pulse server the panel shows a note instead of bars; disable it entirely with `--no-visualizer`
+
 ### Spotify Integration
 Paste a single Spotify track URL - `tuimu` pulls the title from Spotify's public oEmbed and matches it to a free YouTube stream (Spotify playback requires login).
 
@@ -168,6 +175,7 @@ Paste a single Spotify track URL - `tuimu` pulls the title from Spotify's public
 - `TUIMU_YTDLP` - override yt-dlp executable (default: `yt-dlp`)
 - `TUIMU_MPV` - override mpv executable (default: `mpv`)
 - `TUIMU_CURL` - override curl executable (default: `curl`)
+- `TUIMU_PAREC` - override parec executable (default: `parec`)
 
 ## Scripts
 
