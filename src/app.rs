@@ -63,17 +63,50 @@ struct LyricsMessage {
 
 #[derive(Debug, Default)]
 pub struct LyricsState {
-    pub open: bool,
+    pub visible: bool,
     pub track_url: Option<String>,
     pub title: String,
     pub artist: String,
     pub lines: Option<Lyrics>,
     pub loading: bool,
     pub error: Option<String>,
-    pub scroll: usize,
-    pub follow: bool,
     pub instrumental: bool,
     pub source: Option<String>,
+}
+
+/// What the lyrics panel should display for the current state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LyricsStatus {
+    /// No track has been played yet.
+    Idle,
+    /// A fetch is in flight.
+    Loading,
+    /// The fetch failed or produced no lyrics.
+    Unavailable,
+    /// The track is marked as instrumental.
+    Instrumental,
+    /// Lyrics are ready to render.
+    Ready,
+}
+
+impl LyricsState {
+    pub fn status(&self) -> LyricsStatus {
+        if self.loading {
+            LyricsStatus::Loading
+        } else if self.instrumental {
+            LyricsStatus::Instrumental
+        } else if let Some(lines) = &self.lines {
+            if lines.line_count() == 0 {
+                LyricsStatus::Unavailable
+            } else {
+                LyricsStatus::Ready
+            }
+        } else if self.error.is_some() {
+            LyricsStatus::Unavailable
+        } else {
+            LyricsStatus::Idle
+        }
+    }
 }
 
 pub struct App {
@@ -143,7 +176,10 @@ impl App {
             help: false,
             loading: false,
             tick: 0,
-            lyrics: LyricsState::default(),
+            lyrics: LyricsState {
+                visible: lyrics_enabled,
+                ..LyricsState::default()
+            },
             lyrics_enabled,
             quality_filter: QualityFilter::All,
             prev_volume: 70.0,
@@ -189,13 +225,9 @@ impl App {
                 || self.current_track_url() == Some(message.track_url.as_str());
             self.lyrics_cache
                 .insert(message.track_url.clone(), message.result.clone());
-            if is_current && self.lyrics.open {
+            if is_current {
                 self.apply_lyrics_result(&message.result);
             }
-        }
-
-        if self.lyrics.open && self.lyrics.follow {
-            self.scroll_to_current_lyric();
         }
 
         if self.mpv_closed {
@@ -248,11 +280,6 @@ impl App {
             ) {
                 self.help = false;
             }
-            return;
-        }
-
-        if self.lyrics.open {
-            self.handle_lyrics_key(key);
             return;
         }
 
@@ -504,28 +531,12 @@ impl App {
             return;
         }
 
-        if self.lyrics.open {
-            self.lyrics.open = false;
-            return;
+        self.lyrics.visible = !self.lyrics.visible;
+        if self.lyrics.visible {
+            // Hydrate from cache or restart a fetch for the current track so
+            // the panel is never blank when it is shown again.
+            self.request_lyrics_for_current();
         }
-
-        // Open the window even if no track is playing.
-        self.lyrics.open = true;
-        self.lyrics.scroll = 0;
-        self.lyrics.follow = true;
-        self.lyrics.loading = false;
-        self.lyrics.error = None;
-
-        if self.current_track().is_none() {
-            self.lyrics.lines = None;
-            self.lyrics.instrumental = false;
-            self.lyrics.source = None;
-            self.lyrics.track_url = None;
-            self.set_status("No track playing.", true);
-            return;
-        }
-
-        self.request_lyrics_for_current();
     }
 
     fn request_lyrics_for_current(&mut self) {
@@ -580,9 +591,6 @@ impl App {
                 self.lyrics.error = None;
                 self.lyrics.instrumental = lyrics.instrumental;
                 self.lyrics.source = lyrics.source.clone();
-                if self.lyrics.follow {
-                    self.scroll_to_current_lyric();
-                }
             }
             Err(error) => {
                 self.lyrics.lines = None;
@@ -590,71 +598,6 @@ impl App {
                 self.lyrics.error = Some(error.clone());
             }
         }
-    }
-
-    fn handle_lyrics_key(&mut self, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('#') | KeyCode::Char('q') | KeyCode::F(3) => {
-                self.lyrics.open = false;
-            }
-            KeyCode::Char(' ') => {
-                self.lyrics.follow = !self.lyrics.follow;
-                if self.lyrics.follow {
-                    self.scroll_to_current_lyric();
-                }
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.lyrics.scroll = self.lyrics.scroll.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Some(lines) = &self.lyrics.lines {
-                    self.lyrics.scroll =
-                        (self.lyrics.scroll + 1).min(lines.line_count().saturating_sub(1));
-                }
-            }
-            KeyCode::PageUp => {
-                self.lyrics.scroll = self.lyrics.scroll.saturating_sub(5);
-            }
-            KeyCode::PageDown => {
-                if let Some(lines) = &self.lyrics.lines {
-                    self.lyrics.scroll =
-                        (self.lyrics.scroll + 5).min(lines.line_count().saturating_sub(1));
-                }
-            }
-            KeyCode::Home => {
-                self.lyrics.scroll = 0;
-            }
-            KeyCode::End => {
-                if let Some(lines) = &self.lyrics.lines {
-                    self.lyrics.scroll = lines.line_count().saturating_sub(1);
-                }
-            }
-            KeyCode::Char('c') if ctrl => {
-                self.lyrics.open = false;
-            }
-            _ => {}
-        }
-    }
-
-    fn scroll_to_current_lyric(&mut self) {
-        if !self.lyrics.follow || self.lyrics.lines.is_none() {
-            return;
-        }
-        if let (Some(lines), Some(_current)) = (&self.lyrics.lines, self.current_track())
-            && let Some(line_index) = lines.current_line(self.player.position)
-        {
-            let half = self.lyrics_scroll_height() / 2;
-            if line_index < self.lyrics.scroll {
-                self.lyrics.scroll = line_index;
-            } else if line_index >= self.lyrics.scroll + half {
-                self.lyrics.scroll = (line_index + 1).saturating_sub(half);
-            }
-        }
-    }
-
-    fn lyrics_scroll_height(&self) -> usize {
-        10
     }
 
     fn play_queue_index(&mut self, index: usize) {
@@ -668,12 +611,12 @@ impl App {
         self.player.duration = track.duration.unwrap_or(0.0);
         self.player.paused = false;
 
-        let lyrics_open = self.lyrics.open;
-        let lyrics_follow = self.lyrics.follow;
+        let lyrics_visible = self.lyrics.visible;
         self.lyrics = LyricsState::default();
-        self.lyrics.open = lyrics_open;
-        self.lyrics.follow = lyrics_follow;
-        if lyrics_open {
+        self.lyrics.visible = lyrics_visible;
+        // Lyrics follow playback automatically; fetch in the background even
+        // while the panel is hidden so the cache is warm when it is shown.
+        if self.lyrics_enabled {
             self.request_lyrics_for_current();
         }
 
@@ -1184,7 +1127,9 @@ mod tests {
         assert_eq!(app.input.value(), "q@#?f");
         assert!(!app.should_quit);
         assert!(!app.help);
-        assert!(!app.lyrics.open);
+        // The panel is visible by default; typing `#` in the search box must
+        // not toggle it.
+        assert!(app.lyrics.visible);
         assert_eq!(app.source, SearchSource::YouTube);
         assert_eq!(app.quality_filter, QualityFilter::All);
     }

@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table, TableState, Wrap},
 };
 
-use crate::app::{App, Focus};
+use crate::app::{App, Focus, LyricsStatus};
 use crate::model::{Quality, RepeatMode, Source, Track, format_duration, truncate};
 
 const ACCENT: Color = Color::Rgb(190, 150, 255);
@@ -31,19 +31,28 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     draw_header(frame, app, chunks[0]);
 
-    let body = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(chunks[1]);
-    draw_search(frame, app, body[0]);
-    draw_queue(frame, app, body[1]);
+    // Left column: search stacked over queue, each exactly half. The right
+    // half is the lyrics panel, which can be toggled with `#` / F3.
+    let show_lyrics = app.lyrics_enabled && app.lyrics.visible;
+    let columns = if show_lyrics {
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(chunks[1])
+    } else {
+        Layout::horizontal([Constraint::Percentage(100)]).split(chunks[1])
+    };
+    let main = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(columns[0]);
+    draw_search(frame, app, main[0]);
+    draw_queue(frame, app, main[1]);
+    if show_lyrics {
+        draw_lyrics_panel(frame, app, columns[1]);
+    }
     draw_now_playing(frame, app, chunks[2]);
     draw_status(frame, app, chunks[3]);
     draw_footer(frame, app, chunks[4]);
 
     if app.help {
         draw_help(frame, area);
-    }
-    if app.lyrics.open {
-        draw_lyrics(frame, app, area);
     }
 }
 
@@ -491,180 +500,127 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect) {
-    let width = area.width.saturating_sub(4).min(120);
-    let height = area.height.saturating_sub(2).min(30);
-    if width < 20 || height < 8 {
-        return;
-    }
-    let popup = Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
-        width,
-        height,
-    };
-    frame.render_widget(Clear, popup);
-
+fn draw_lyrics_panel(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            " Lyrics · Esc to close ",
-            Style::default().fg(ACCENT).bold(),
-        ))
-        .style(Style::default().bg(Color::Rgb(17, 17, 24)));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-    if inner.height == 0 {
+        .border_style(border_style(false))
+        .title(Span::styled(" Lyrics ", Style::default().fg(ACCENT).bold()))
+        .style(Style::default().bg(PANEL_BG));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
         return;
     }
 
-    let content = if app.lyrics.loading {
-        vec![Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(spinner(app.tick), Style::default().fg(YELLOW)),
-            Span::styled(" Loading lyrics…", Style::default().fg(Color::White)),
-        ])]
-    } else if let Some(error) = &app.lyrics.error {
-        vec![Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled("✗", Style::default().fg(RED)),
-            Span::styled(
-                format!(" Error: {}", error),
-                Style::default().fg(Color::White),
-            ),
-        ])]
-    } else if app.lyrics.instrumental {
-        vec![Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled("♪", Style::default().fg(GREEN)),
-            Span::styled(" Instrumental", Style::default().fg(Color::White)),
-        ])]
-    } else if app.lyrics.lines.is_none() {
-        vec![Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled("—", Style::default().fg(MUTED)),
-            Span::styled(" No lyrics found", Style::default().fg(Color::White)),
-        ])]
-    } else if let Some(lines) = &app.lyrics.lines {
-        let total = lines.line_count();
-        if total == 0 {
-            vec![Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled("—", Style::default().fg(MUTED)),
-                Span::styled(" No lyrics found", Style::default().fg(Color::White)),
-            ])]
-        } else {
-            let visible = (inner.height as usize).saturating_sub(4).max(1);
-            let half = visible / 2;
-            let scroll_start = app
-                .lyrics
-                .scroll
-                .saturating_sub(half)
-                .min(total.saturating_sub(1));
-            let scroll_end = (scroll_start + visible).min(total);
-            let current_line = app
-                .lyrics
-                .lines
-                .as_ref()
-                .and_then(|lyrics| lyrics.current_line(app.player.position));
-
-            let mut content = Vec::new();
-            if scroll_start > 0 {
-                content.push(Line::from(vec![
-                    Span::styled("   ", Style::default()),
-                    Span::styled("⋮", Style::default().fg(MUTED)),
-                ]));
-            }
-
-            if let Some(synced_lines) = &lines.synced {
-                for (index, line) in synced_lines[scroll_start..scroll_end].iter().enumerate() {
-                    let line_index = scroll_start + index;
-                    let is_current = app.lyrics.follow
-                        && app.current_track().is_some()
-                        && current_line == Some(line_index);
-                    let prefix = if is_current {
-                        Span::styled("▶ ", Style::default().fg(GREEN).bold())
-                    } else {
-                        Span::styled("  ", Style::default())
-                    };
-                    let text = if is_current {
-                        Span::styled(&line.text, Style::default().fg(GREEN))
-                    } else {
-                        Span::raw(&line.text)
-                    };
-                    content.push(Line::from(vec![prefix, text]));
-                }
-            } else if let Some(plain) = &lines.plain {
-                let plain_lines: Vec<&str> = plain.lines().collect();
-                for text in plain_lines[scroll_start..scroll_end].iter() {
-                    content.push(Line::from(vec![
-                        Span::styled("  ", Style::default()),
-                        Span::raw(*text),
-                    ]));
-                }
-            }
-
-            if scroll_end < total {
-                content.push(Line::from(vec![
-                    Span::styled("   ", Style::default()),
-                    Span::styled("⋮", Style::default().fg(MUTED)),
-                ]));
-            }
-
-            content
-        }
+    let title_line = if app.lyrics.title.is_empty() {
+        Line::from(Span::styled(
+            " Waiting for playback… ",
+            Style::default().fg(MUTED).italic(),
+        ))
     } else {
-        vec![]
-    };
-
-    let info = if app.lyrics.follow {
-        format!("{} · Auto-follow", app.lyrics.artist)
-    } else {
-        format!("{} · Manual scroll", app.lyrics.artist)
-    };
-    let info = Line::from(vec![
-        Span::styled("  ", Style::default()),
-        Span::styled(info, Style::default().fg(MUTED)),
-    ]);
-
-    let source_info = app.lyrics.source.as_ref().map(|source| {
         Line::from(vec![
-            Span::styled("  ", Style::default()),
+            Span::styled(" ", Style::default()),
             Span::styled(
-                format!("Source: {source}"),
-                Style::default().fg(Color::Yellow),
+                truncate(&app.lyrics.title, 30),
+                Style::default().fg(Color::White).bold(),
+            ),
+            Span::styled(
+                format!(" — {}", truncate(&app.lyrics.artist, 20)),
+                Style::default().fg(MUTED),
             ),
         ])
-    });
-
-    let controls = Line::from(vec![
-        Span::styled("  ", Style::default()),
-        Span::styled("Space", Style::default().fg(ACCENT)),
-        Span::styled(" auto-follow  ", Style::default().fg(MUTED)),
-        Span::styled("j/k", Style::default().fg(ACCENT)),
-        Span::styled(" scroll  ", Style::default().fg(MUTED)),
-        Span::styled("Esc/#", Style::default().fg(ACCENT)),
-        Span::styled(" close", Style::default().fg(MUTED)),
-    ]);
-
-    let layout = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(content.len().min(inner.height as usize).try_into().unwrap()),
-        Constraint::Length(1),
-        Constraint::Length(if source_info.is_some() { 1 } else { 0 }),
-        Constraint::Length(1),
-    ])
-    .split(inner);
-    frame.render_widget(Paragraph::new(content).wrap(Wrap { trim: true }), layout[1]);
-    frame.render_widget(Paragraph::new(info), layout[2]);
-    let source_info_index = if let Some(ref source_info) = source_info {
-        frame.render_widget(Paragraph::new(source_info.clone()), layout[3]);
-        1
-    } else {
-        0
     };
-    frame.render_widget(Paragraph::new(controls), layout[source_info_index + 3]);
+    frame.render_widget(Paragraph::new(title_line), Rect { height: 1, ..inner });
+
+    let content_area = Rect {
+        y: inner.y + 1,
+        height: inner.height.saturating_sub(1),
+        ..inner
+    };
+    if content_area.height == 0 {
+        return;
+    }
+
+    let content: Vec<Line> = if !app.lyrics_enabled {
+        hint_lines("Lyrics disabled (--no-lyrics)")
+    } else if app.current_track().is_none() {
+        hint_lines("Lyrics will appear when playback starts")
+    } else {
+        match app.lyrics.status() {
+            LyricsStatus::Loading => vec![Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(spinner(app.tick), Style::default().fg(YELLOW)),
+                Span::styled(" Loading lyrics…", Style::default().fg(Color::White)),
+            ])],
+            LyricsStatus::Unavailable => vec![Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled("✗", Style::default().fg(RED)),
+                Span::styled(" Lyrics Unavailable", Style::default().fg(Color::White)),
+            ])],
+            LyricsStatus::Instrumental => vec![Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled("♪", Style::default().fg(GREEN)),
+                Span::styled(" Instrumental", Style::default().fg(Color::White)),
+            ])],
+            LyricsStatus::Ready | LyricsStatus::Idle => lyrics_lines(app, content_area),
+        }
+    };
+
+    frame.render_widget(
+        Paragraph::new(content).wrap(Wrap { trim: true }),
+        content_area,
+    );
+}
+
+fn hint_lines(message: &str) -> Vec<Line<'static>> {
+    vec![Line::from(Span::styled(
+        format!(" {message}"),
+        Style::default().fg(MUTED).italic(),
+    ))]
+}
+
+fn lyrics_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
+    let Some(lyrics) = &app.lyrics.lines else {
+        return hint_lines("Lyrics will appear when playback starts");
+    };
+    let visible = area.height as usize;
+    let mut content = Vec::new();
+
+    if let Some(synced) = &lyrics.synced {
+        let total = synced.len();
+        let current = lyrics.current_line(app.player.position);
+        let anchor = current.unwrap_or(0);
+        let start = if total <= visible {
+            0
+        } else {
+            anchor.saturating_sub(visible / 2).min(total - visible)
+        };
+        let end = (start + visible).min(total);
+        for (offset, line) in synced[start..end].iter().enumerate() {
+            let is_current = current == Some(start + offset);
+            let prefix = if is_current {
+                Span::styled("▶ ", Style::default().fg(GREEN).bold())
+            } else {
+                Span::styled("  ", Style::default())
+            };
+            let text = if is_current {
+                Span::styled(line.text.clone(), Style::default().fg(GREEN))
+            } else {
+                Span::raw(line.text.clone())
+            };
+            content.push(Line::from(vec![prefix, text]));
+        }
+    } else if let Some(plain) = &lyrics.plain {
+        // Plain lyrics have no timestamps to follow, so render from the top.
+        for text in plain.lines().take(visible) {
+            content.push(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::raw(text.to_string()),
+            ]));
+        }
+    }
+
+    content
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
@@ -729,11 +685,8 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_line("Q / T", "sort by quality / duration"),
         Line::from(Span::raw("")),
         section("LYRICS"),
-        help_line("# / F3", "show/hide lyrics"),
-        help_line("Space", "auto-follow on/off"),
-        help_line("j / k", "scroll up/down"),
-        help_line("PageUp/Down", "scroll page"),
-        help_line("Home/End", "scroll to start/end"),
+        help_line("# / F3", "show/hide lyrics panel"),
+        help_line("Auto", "follows the current track"),
         Line::from(Span::raw("")),
         section("SOURCES"),
         help_line("Search", "YouTube, SoundCloud"),
