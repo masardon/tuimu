@@ -51,7 +51,7 @@ Or run in development: `cargo run`
 
 ### Using the Installation Script
 
-One-liner (downloads the latest release build — no Cargo or repo clone needed):
+One-liner. On Linux it downloads the latest release build; on Termux (Android) it installs the dependencies via `pkg` and builds from source automatically:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/masardon/tuimu/main/install.sh | bash
@@ -205,7 +205,7 @@ Paste a single Spotify track URL - TuiMu pulls the title from Spotify's public o
 
 ### Termux (Android)
 
-TuiMu runs on [Termux](https://termux.dev) with `pkg install rust mpv pulseaudio yt-dlp`, or with the one-line installer (see Install above). Under Termux the app starts the per-user pulseaudio daemon on demand (`module-sles-sink` outputs to the Android speakers) and routes playback through it with `--ao=pulse`, so the visualizer works out of the box. When the `pulseaudio` package is missing, TuiMu falls back to Android's native audio output — playback keeps working, the visualizer just shows a note.
+TuiMu runs on [Termux](https://termux.dev). Install everything with the one-line installer above, or manually: `pkg install rust binutils git mpv pulseaudio yt-dlp`. Under Termux the app starts the per-user pulseaudio daemon on demand (`module-sles-sink` outputs to the Android speakers) and routes playback through it with `--ao=pulse`, so the visualizer works out of the box. When the `pulseaudio` package is missing, TuiMu falls back to Android's native audio output — playback keeps working, the visualizer just shows a note.
 
 If the panel stays silent despite all this, start the daemon manually and retry (toggle `v` twice):
 
