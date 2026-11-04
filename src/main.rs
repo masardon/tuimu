@@ -7,6 +7,7 @@ mod model;
 mod mpv;
 mod playlist;
 mod pulse;
+mod sync;
 mod ui;
 mod visualizer;
 mod ytdlp;

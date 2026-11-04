@@ -90,7 +90,7 @@ impl fmt::Display for SearchSource {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Track {
     pub title: String,
     pub artist: String,

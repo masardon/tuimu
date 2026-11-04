@@ -193,6 +193,67 @@ pub fn sanitize_name(name: &str) -> String {
     sanitized.chars().take(NAME_MAX_CHARS).collect()
 }
 
+/// Raw content of a playlist file (used by the sync engine, which moves
+/// bytes between devices without re-encoding).
+pub fn read_raw(dir: &std::path::Path, name: &str) -> Result<Option<String>> {
+    let sanitized = sanitize_name(name);
+    if sanitized.is_empty() {
+        return Ok(None);
+    }
+    match fs::read_to_string(dir.join(format!("{sanitized}.json"))) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context("could not read the playlist file"),
+    }
+}
+
+/// Write raw bytes as a playlist file (temp + rename, like every save).
+pub fn write_raw(dir: &std::path::Path, name: &str, content: &str) -> Result<()> {
+    let sanitized = sanitize_name(name);
+    anyhow::ensure!(!sanitized.is_empty(), "playlist name is empty");
+    fs::create_dir_all(dir).context("could not create the playlists directory")?;
+    let path = dir.join(format!("{sanitized}.json"));
+    let mut tmp = path.clone().into_os_string();
+    tmp.push(".tmp");
+    fs::write(&tmp, content).context("could not write the playlist file")?;
+    fs::rename(&tmp, &path).context("could not finalize the playlist file")?;
+    Ok(())
+}
+
+/// Re-encode playlist JSON with a new revision stamp (device + time).
+pub fn reencode_with_revision(content: &str, revision: u64, device: &str) -> Result<String> {
+    let mut doc: Value =
+        serde_json::from_str(content).context("playlist file is not valid JSON")?;
+    anyhow::ensure!(
+        doc.get("tracks").is_some_and(Value::is_array),
+        "not a playlist"
+    );
+    doc["version"] = json!(2);
+    doc["revision"] = json!(revision);
+    doc["updated_at"] = json!(crate::model::now_epoch());
+    doc["device"] = json!(device);
+    serde_json::to_string_pretty(&doc).context("could not encode the playlist")
+}
+
+/// Metadata + tracks parsed from raw playlist JSON (sync engine view).
+pub fn parse_raw(content: &str) -> Result<Playlist> {
+    let json: Value = serde_json::from_str(content).context("playlist file is not valid JSON")?;
+    Ok(Playlist {
+        tracks: json
+            .get("tracks")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(track_from_json).collect())
+            .unwrap_or_default(),
+        revision: json.get("revision").and_then(Value::as_u64).unwrap_or(0),
+        updated_at: json.get("updated_at").and_then(Value::as_u64).unwrap_or(0),
+        device: json
+            .get("device")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
 /// List saved playlist names, sorted alphabetically.
 pub fn list(dir: &std::path::Path) -> Vec<String> {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -357,7 +418,7 @@ pub fn remove_track_with_device(
     Ok(true)
 }
 
-fn track_to_json(track: &Track) -> Value {
+pub(crate) fn track_to_json(track: &Track) -> Value {
     json!({
         "title": track.title,
         "artist": track.artist,
