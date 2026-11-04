@@ -2,7 +2,7 @@
 
 A fast, free terminal music player. Search YouTube and SoundCloud, paste any URL that [yt-dlp](https://github.com/yt-dlp/yt-dlp) supports, queue tracks, and play them with [mpv](https://mpv.io/).
 
-No accounts, no logins, no paid APIs.
+No accounts, no logins, no paid APIs. Optional playlist sync uses *your own* Dropbox — nothing leaves your device unless you turn it on.
 
 [![GitHub](https://img.shields.io/github/stars/masardon/tuimu?style=social)](https://github.com/masardon/tuimu)
 [![GitHub issues](https://img.shields.io/github/issues/masardon/tuimu)](https://github.com/masardon/tuimu/issues)
@@ -180,6 +180,7 @@ While the search box is focused, printable keys (including `q`, `@`, `#`, and `?
 - Press `o` to browse saved playlists: `Enter` loads and plays one, `a` appends it to the current queue, `e` inspects its tracks (`d` removes a track), `d` deletes, `r` renames
 - Start directly with one: `tuimu --playlist "name"`
 - Playlists are stored as JSON under `~/.local/share/tuimu/playlists/` (or `$XDG_DATA_HOME/tuimu/playlists/`) and keep each track's source URL, so they work across sessions
+- Sync them between devices through your own Dropbox — see [Playlist Sync](#playlist-sync-optional)
 
 ### Visualizer
 - Press `v` to toggle the spectrum panel; with the lyrics panel visible it occupies the bottom quarter of the right column
@@ -202,6 +203,30 @@ Paste a single Spotify track URL - TuiMu pulls the title from Spotify's public o
 - `TUIMU_PAREC` - override parec executable (default: `parec`)
 - `TUIMU_PULSEAUDIO` - override pulseaudio executable (default: `pulseaudio`)
 - `TUIMU_AO` - force mpv's audio output (e.g. `pulse`, `opensles`). On Termux, `pulse` is selected automatically
+- `TUIMU_DROPBOX_CLIENT_ID` - override the Dropbox app key used for sync (development)
+
+### Playlist Sync (optional)
+
+Playlists can sync between your devices through your own Dropbox — no TuiMu account, no TuiMu server:
+
+1. Press `Y` in the results or queue view, confirm this device's name, and approve TuiMu in the browser that opens (on Termux the browser opens automatically; `Tab` switches to a paste-the-code mode for SSH sessions)
+2. Run TuiMu on another device, pair it with the **same Dropbox account**, and the playlists merge
+
+How it behaves:
+
+- Sync runs at startup, a few seconds after you edit a playlist, and on demand with `Ctrl+Y`; the status line shows the result (`sync ✓ · 2m`)
+- Tracks merge by identity, so the same song added on two devices deduplicates; deletions win; when the same track is edited differently on both sides, both playlists are kept as `name (conflict-device)` — no edit is ever lost
+- Offline edits queue locally and upload on the next successful sync
+
+Privacy and scope:
+
+- TuiMu only ever receives an *app folder* (`/Apps/TuiMu/`) — it cannot see or touch the rest of your Dropbox
+- Nothing leaves your device unless you pair it; delete the app under Dropbox → Account → Apps to unpair everything
+- Tokens are stored locally with `600` permissions; TuiMu has no client secret and uses PKCE
+
+Sync state lives in `~/.local/share/tuimu/playlists/.sync/`. Removing a device: unlink the app from that device's token file or re-pair.
+
+> **Maintainer note (Dropbox policy):** the built-in app key runs in Dropbox *development* status, which allows up to 500 linked users. Once the app passes **50 linked users**, Dropbox requires applying for production within two weeks — put a reminder in place if usage grows.
 
 ### Termux (Android)
 
