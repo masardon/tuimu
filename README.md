@@ -18,7 +18,7 @@ No accounts, no logins, no paid APIs.
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) - finds and extracts audio
 - [mpv](https://mpv.io/) - plays audio over JSON IPC
 - [curl](https://curl.se/) - used for lyrics lookups and optional Spotify track metadata lookup
-- PulseAudio or PipeWire (`parec`) - optional, only needed for the audio visualizer
+- PulseAudio or PipeWire (`parec`) - optional, only needed for the audio visualizer (on Termux: the `pulseaudio` package)
 
 ## Install
 
@@ -183,7 +183,7 @@ While the search box is focused, printable keys (including `q`, `@`, `#`, and `?
 
 ### Visualizer
 - Press `v` to toggle the spectrum panel; with the lyrics panel visible it occupies the bottom quarter of the right column
-- Audio is tapped from the default output monitor via `parec` (PulseAudio or PipeWire-pulse), so it reflects whatever the desktop is playing
+- Audio is tapped from the default output monitor via `parec` (PulseAudio or PipeWire-pulse), so it reflects whatever the desktop is playing. On Termux, playback is routed through the per-user pulseaudio daemon, so the panel shows TuiMu's own audio (see the Termux section below)
 - Without a pulse server the panel shows a note instead of bars; disable it entirely with `--no-visualizer`
 
 ### Spotify Integration
@@ -205,7 +205,7 @@ Paste a single Spotify track URL - TuiMu pulls the title from Spotify's public o
 
 ### Termux (Android)
 
-TuiMu runs on [Termux](https://termux.dev). Install everything with the one-line installer above, or manually: `pkg install rust binutils git mpv pulseaudio yt-dlp`. Under Termux the app starts the per-user pulseaudio daemon on demand (`module-sles-sink` outputs to the Android speakers) and routes playback through it with `--ao=pulse`, so the visualizer works out of the box. When the `pulseaudio` package is missing, TuiMu falls back to Android's native audio output — playback keeps working, the visualizer just shows a note.
+TuiMu runs on [Termux](https://termux.dev). Install everything with the one-line installer above, or manually: `pkg install mpv pulseaudio yt-dlp` (plus `rust binutils git` when building from source). Under Termux the app starts the per-user pulseaudio daemon on demand (`module-sles-sink` outputs to the Android speakers) and routes playback through it with `--ao=pulse`, so the visualizer works out of the box. When the `pulseaudio` package is missing, TuiMu falls back to Android's native audio output — playback keeps working, the visualizer just shows a note.
 
 If the panel stays silent despite all this, start the daemon manually and retry (toggle `v` twice):
 
@@ -223,8 +223,10 @@ Cargo, mpv, or yt-dlp caches:
 ```
 
 ### install.sh
-Downloads the latest pre-built release for your architecture and installs it to
-`/usr/local/bin`:
+Downloads the latest pre-built release for your architecture and installs it:
+- Linux: to `/usr/local/bin` (pre-built binary)
+- Termux: to `$PREFIX/bin`, preferring a pre-built Android binary and falling
+  back to building from source
 ```bash
 ./install.sh
 ```
