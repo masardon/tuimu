@@ -73,22 +73,24 @@ fn ensure_daemon_with(bin: &str) -> bool {
 mod tests {
     use super::*;
 
-    // /system/bin binaries exist on every Android device and exit with a
-    // fixed status, which makes them stand-ins for a working or broken
-    // pulseaudio installation.
+    // `true` and `false` are resolved through PATH, so the tests are
+    // portable: coreutils on the CI runners, $PREFIX/bin/coreutils under
+    // Termux. Both ignore extra arguments and exit with a fixed status,
+    // which makes them stand-ins for a working or broken pulseaudio.
+    // (`--check` succeeding means a daemon runs.)
     #[test]
-    fn missing_or_failing_binary_reports_no_daemon() {
-        assert!(!daemon_running_with("/system/bin/false"));
+    fn failing_binary_reports_no_daemon() {
+        assert!(!daemon_running_with("false"));
     }
 
     #[test]
     fn ensure_with_failing_binary_gives_up() {
-        assert!(!ensure_daemon_with("/system/bin/false"));
+        assert!(!ensure_daemon_with("false"));
     }
 
     #[test]
     fn zero_exit_reports_daemon() {
-        assert!(daemon_running_with("/system/bin/true"));
+        assert!(daemon_running_with("true"));
     }
 
     #[test]
