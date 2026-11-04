@@ -11,6 +11,10 @@
 //! `state`, and shut down immediately — and PKCE makes an intercepted code
 //! useless without the in-memory verifier.
 
+// The pairing/browser chain is compiled out in tests (no real browser,
+// listener, or network during cargo test).
+#![cfg_attr(test, allow(dead_code))]
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -79,6 +83,11 @@ pub fn begin() -> PendingAuth {
 }
 
 impl PendingAuth {
+    /// PKCE verifier (kept by the wizard for the manual fallback).
+    pub fn verifier(&self) -> &str {
+        &self.verifier
+    }
+
     pub fn authorize_url(&self) -> String {
         format!(
             "{AUTH_ENDPOINT}?client_id={}&response_type=code&code_challenge={}&code_challenge_method=S256&redirect_uri={}&state={}&token_access_type=offline",
@@ -136,12 +145,6 @@ impl PendingAuth {
                 Err(_) => std::thread::sleep(Duration::from_millis(100)),
             }
         }
-    }
-
-    /// Manual fallback: the user opens the URL anywhere, gets a code, and
-    /// pastes it into the wizard.
-    pub fn exchange_manual(&self, code: &str) -> AuthOutcome {
-        self.exchange(code.trim())
     }
 
     fn exchange(&self, code: &str) -> AuthOutcome {
@@ -286,36 +289,34 @@ pub fn token_path() -> PathBuf {
         .join("dropbox.json")
 }
 
-pub fn save_tokens(tokens: &Tokens) -> Result<()> {
-    let path = token_path();
+pub fn save_tokens_at(path: &std::path::Path, tokens: &Tokens) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).context("could not create the tokens directory")?;
     }
     let json = serde_json::to_string(tokens).context("could not encode tokens")?;
-    fs::write(&path, json).context("could not write the token file")?;
+    fs::write(path, json).context("could not write the token file")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
     }
     Ok(())
 }
 
-pub fn load_tokens() -> Option<Tokens> {
-    let json = fs::read_to_string(token_path()).ok()?;
+pub fn load_tokens_at(path: &std::path::Path) -> Option<Tokens> {
+    let json = fs::read_to_string(path).ok()?;
     serde_json::from_str(&json).ok()
 }
 
-pub fn clear_tokens() {
-    let _ = fs::remove_file(token_path());
+pub fn clear_tokens_at(path: &std::path::Path) {
+    let _ = fs::remove_file(path);
 }
 
-/// A ready-to-use access token, refreshing first when close to expiry.
-pub fn current_access_token() -> Result<String> {
-    let mut tokens = load_tokens().context("this device is not paired for sync")?;
+pub fn current_access_token_at(path: &std::path::Path) -> Result<String> {
+    let mut tokens = load_tokens_at(path).context("this device is not paired for sync")?;
     if tokens.needs_refresh(crate::model::now_epoch()) {
         tokens = refresh_tokens(&tokens.refresh).context("could not refresh the sync token")?;
-        save_tokens(&tokens)?;
+        save_tokens_at(path, &tokens)?;
     }
     Ok(tokens.access)
 }
@@ -365,17 +366,19 @@ mod tests {
 
     #[test]
     fn tokens_roundtrip_and_report_expiry() {
+        let path = std::env::temp_dir().join(format!("tuimu-auth-tokens-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
         let tokens = Tokens {
             access: "at".into(),
             refresh: "rt".into(),
             expires_at: crate::model::now_epoch() + 100,
         };
-        save_tokens(&tokens).expect("save");
-        assert_eq!(load_tokens().expect("load").access, "at");
+        save_tokens_at(&path, &tokens).expect("save");
+        assert_eq!(load_tokens_at(&path).expect("load").access, "at");
         assert!(!tokens.needs_refresh(crate::model::now_epoch()));
         assert!(tokens.needs_refresh(tokens.expires_at));
-        clear_tokens();
-        assert!(load_tokens().is_none());
+        clear_tokens_at(&path);
+        assert!(load_tokens_at(&path).is_none());
     }
 
     #[test]

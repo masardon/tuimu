@@ -20,8 +20,6 @@ pub struct SyncConfig {
 }
 
 impl SyncConfig {
-    /// Used by the sync pairing wizard when it persists the config.
-    #[allow(dead_code)]
     pub fn to_toml(&self) -> String {
         format!("[sync]\nenabled = {}\n", self.enabled)
     }
@@ -45,6 +43,12 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Where [`Config::load`] looks; used by the app for injectable test
+    /// paths.
+    pub fn default_path() -> PathBuf {
+        config_path().unwrap_or_else(|| PathBuf::from("config.toml"))
+    }
+
     /// Load from the default location; defaults when anything is off.
     pub fn load() -> Self {
         let Some(path) = config_path() else {
@@ -64,16 +68,6 @@ impl Config {
         toml::from_str(&text).context("config.toml is not valid TOML")
     }
 
-    /// Persists the config; first called by the sync pairing wizard.
-    #[allow(dead_code)]
-    pub fn save(&self) -> Result<()> {
-        let Some(path) = config_path() else {
-            anyhow::bail!("could not resolve the configuration directory");
-        };
-        self.save_to(&path)
-    }
-
-    #[allow(dead_code)]
     pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).context("could not create the config directory")?;

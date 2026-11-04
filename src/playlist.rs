@@ -63,15 +63,18 @@ impl PlaylistStore {
         }
     }
 
-    #[cfg(test)]
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
-    /// Read by the sync engine when it pairs this device.
-    #[allow(dead_code)]
     pub fn device(&self) -> &str {
         &self.device
+    }
+
+    /// Update the device name used to stamp future saves (pairing
+    /// wizard).
+    pub fn set_device(&mut self, device: String) {
+        self.device = device;
     }
 
     pub fn save(&mut self, name: &str, tracks: &[Track]) -> Result<()> {

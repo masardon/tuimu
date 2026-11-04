@@ -6,7 +6,9 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table, TableState, Wrap},
 };
 
-use crate::app::{App, Focus, LyricsStatus, NameAction, PickerLevel, PickerMode, PlaylistUi};
+use crate::app::{
+    App, Focus, LyricsStatus, NameAction, PickerLevel, PickerMode, PlaylistUi, SyncUi,
+};
 use crate::model::{Quality, RepeatMode, Source, Track, format_duration, truncate};
 use crate::visualizer::{BANDS, VisualizerStatus};
 
@@ -65,6 +67,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_help(frame, area);
     }
     draw_playlist_popup(frame, app, area);
+    draw_sync_dialog(frame, app, area);
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -447,6 +450,30 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         MUTED
     };
     spans.push(Span::styled(&app.status, Style::default().fg(color)));
+
+    // Right-aligned sync state, only once this device is paired.
+    if app.sync_paired() {
+        let (label, label_color) = if app.sync_busy() {
+            (" ⟳ sync".to_string(), YELLOW)
+        } else if let Some(last) = app.sync_last() {
+            let minutes = last.elapsed().as_secs() / 60;
+            let age = if minutes < 1 {
+                "now".to_string()
+            } else if minutes < 60 {
+                format!("{minutes}m")
+            } else {
+                format!("{}h", minutes / 60)
+            };
+            (format!(" sync {} · {}", app.sync_summary(), age), GREEN)
+        } else {
+            (" sync off".to_string(), MUTED)
+        };
+        spans.push(Span::styled(
+            format!("{label:>28}"),
+            Style::default().fg(label_color),
+        ));
+    }
+
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -730,6 +757,164 @@ fn draw_playlist_popup(frame: &mut Frame, app: &App, area: Rect) {
             selected,
             names,
         } => draw_playlist_picker(frame, area, mode, level, *selected, names),
+    }
+}
+
+fn draw_sync_dialog(frame: &mut Frame, app: &App, area: Rect) {
+    let title = " Device sync ";
+    match &app.sync_ui {
+        SyncUi::None => {}
+        SyncUi::Intro { input } => {
+            let popup = popup_area(area, 58, 9);
+            frame.render_widget(Clear, popup);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style(false))
+                .title(Span::styled(title, Style::default().fg(ACCENT).bold()))
+                .style(Style::default().bg(PANEL_BG));
+            let inner = block.inner(popup);
+            frame.render_widget(block, popup);
+            let lines = vec![Line::from(Span::styled(
+                "Pair this device with your Dropbox to sync playlists across devices.",
+                Style::default().fg(MUTED),
+            ))];
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+            let rows = Layout::vertical([
+                Constraint::Length(2),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .split(inner);
+            let label = if input.is_empty() {
+                "Device name:".to_string()
+            } else {
+                format!("Device name: {}|", input.value())
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(label, Style::default().fg(GREEN))),
+                rows[1],
+            );
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "Enter pair · Esc cancel",
+                    Style::default().fg(MUTED),
+                )),
+                rows[3],
+            );
+        }
+        SyncUi::Waiting {
+            url,
+            manual,
+            input,
+            verifier: _,
+        } => {
+            let popup = popup_area(area, 64, if *manual { 12 } else { 9 });
+            frame.render_widget(Clear, popup);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style(false))
+                .title(Span::styled(title, Style::default().fg(ACCENT).bold()))
+                .style(Style::default().bg(PANEL_BG));
+            let inner = block.inner(popup);
+            frame.render_widget(block, popup);
+
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    "Browser opened — approve TuiMu in Dropbox.",
+                    Style::default().fg(MUTED),
+                )),
+                Line::from(Span::styled(url.clone(), Style::default().fg(ACCENT_DIM))),
+                Line::from(Span::styled(
+                    "The error page after approving is expected.",
+                    Style::default().fg(MUTED),
+                )),
+            ];
+            if *manual {
+                lines.push(Line::from(Span::styled(
+                    "Open the link, approve, then paste the code= value:",
+                    Style::default().fg(MUTED),
+                )));
+            }
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+
+            if *manual {
+                let rows = Layout::vertical([
+                    Constraint::Length(4),
+                    Constraint::Length(1),
+                    Constraint::Min(0),
+                ])
+                .split(inner);
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        format!("Code: {}|", input.value()),
+                        Style::default().fg(GREEN),
+                    )),
+                    rows[1],
+                );
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "Enter submit · Tab browser mode · Esc cancel",
+                        Style::default().fg(MUTED),
+                    )),
+                    rows[2],
+                );
+            } else {
+                let rows =
+                    Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(inner);
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "Tab manual mode · Esc cancel",
+                        Style::default().fg(MUTED),
+                    )),
+                    rows[1],
+                );
+            }
+        }
+        SyncUi::Paired { summary } => {
+            let popup = popup_area(area, 52, 6);
+            frame.render_widget(Clear, popup);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style(true))
+                .title(Span::styled(title, Style::default().fg(GREEN).bold()))
+                .style(Style::default().bg(PANEL_BG));
+            let inner = block.inner(popup);
+            frame.render_widget(block, popup);
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from(Span::styled(
+                        format!("✓ {summary}"),
+                        Style::default().fg(GREEN),
+                    )),
+                    Line::from(Span::styled(
+                        "Syncing playlists… Enter close",
+                        Style::default().fg(MUTED),
+                    )),
+                ]),
+                inner,
+            );
+        }
+        SyncUi::Failed { message } => {
+            let popup = popup_area(area, 60, 7);
+            frame.render_widget(Clear, popup);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style(false))
+                .title(Span::styled(title, Style::default().fg(RED).bold()))
+                .style(Style::default().bg(PANEL_BG));
+            let inner = block.inner(popup);
+            frame.render_widget(block, popup);
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from(Span::styled("Pairing failed:", Style::default().fg(RED))),
+                    Line::from(Span::styled(message.clone(), Style::default().fg(MUTED))),
+                    Line::from(Span::styled("Esc close", Style::default().fg(MUTED))),
+                ])
+                .wrap(Wrap { trim: true }),
+                inner,
+            );
+        }
     }
 }
 

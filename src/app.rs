@@ -13,8 +13,43 @@ use crate::lyrics::{self, Lyrics};
 use crate::model::{QualityFilter, RepeatMode, SearchSource, Track};
 use crate::mpv::{Mpv, MpvMessage, Player};
 use crate::playlist::{self, Playlist, PlaylistStore};
+use crate::sync::auth::Tokens;
+use crate::sync::{self, CycleReport};
 use crate::visualizer::{BANDS, Visualizer, VisualizerStatus, smooth};
 use crate::ytdlp::{self, Lookup, StreamInfo};
+
+/// In-app pairing wizard (opened with `Y`).
+#[derive(Clone, Debug)]
+pub enum SyncUi {
+    None,
+    /// Choose/confirm this device's name.
+    Intro {
+        input: TextInput,
+    },
+    /// Waiting for the browser redirect; `url` is shown for manual use.
+    Waiting {
+        url: String,
+        /// PKCE verifier kept for the manual code-paste fallback.
+        verifier: String,
+        manual: bool,
+        input: TextInput,
+    },
+    Paired {
+        summary: String,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+// Variants are only constructed by the sync worker threads, which are
+// compiled out during tests.
+#[allow(dead_code)]
+enum SyncMessage {
+    Paired(Tokens),
+    PairOutcome(String),
+    Cycle(Result<CycleReport, String>),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
@@ -186,9 +221,22 @@ pub struct App {
     pub lyrics: LyricsState,
     pub lyrics_enabled: bool,
     pub playlist_ui: PlaylistUi,
+    pub sync_ui: SyncUi,
     playlists: PlaylistStore,
     /// When playlist files were last scanned for external changes.
     playlist_scan_at: Instant,
+    sync_summary: String,
+    sync_last: Option<Instant>,
+    sync_busy: bool,
+    sync_startup_done: bool,
+    sync_dirty_at: Option<Instant>,
+    // Cloned by the (test-excluded) sync workers.
+    #[allow(dead_code)]
+    sync_tx: Sender<SyncMessage>,
+    sync_rx: Receiver<SyncMessage>,
+    /// Injectable paths so tests never touch real config/token files.
+    config_path: PathBuf,
+    token_path: PathBuf,
     pub viz_enabled: bool,
     pub viz_visible: bool,
     viz: Visualizer,
@@ -220,6 +268,7 @@ impl App {
         let (search_tx, search_rx) = mpsc::channel();
         let (play_tx, play_rx) = mpsc::channel();
         let (lyrics_tx, lyrics_rx) = mpsc::channel();
+        let (sync_tx, sync_rx) = mpsc::channel();
         Self {
             should_quit: false,
             focus: Focus::Search,
@@ -248,11 +297,21 @@ impl App {
             },
             lyrics_enabled,
             playlist_ui: PlaylistUi::None,
+            sync_ui: SyncUi::None,
             playlists: PlaylistStore::open(
                 playlist::playlists_dir().unwrap_or_else(|_| PathBuf::from(".")),
                 config::Config::load().device,
             ),
             playlist_scan_at: Instant::now(),
+            sync_summary: String::new(),
+            sync_last: None,
+            sync_busy: false,
+            sync_startup_done: false,
+            sync_dirty_at: None,
+            sync_tx,
+            sync_rx,
+            config_path: config::Config::default_path(),
+            token_path: sync::auth::token_path(),
             viz_enabled,
             viz_visible: viz_enabled,
             viz: Visualizer::default(),
@@ -294,6 +353,9 @@ impl App {
                 self.set_status("Playlists changed on disk.", false);
             }
         }
+
+        self.poll_sync_messages();
+        self.maybe_sync();
 
         while let Ok(message) = self.search_rx.try_recv() {
             if message.seq == self.search_seq {
@@ -408,6 +470,282 @@ impl App {
         }
     }
 
+    // ---- device sync -------------------------------------------------
+
+    pub fn sync_paired(&self) -> bool {
+        sync::auth::load_tokens_at(&self.token_path).is_some()
+    }
+
+    pub fn sync_busy(&self) -> bool {
+        self.sync_busy
+    }
+
+    pub fn sync_last(&self) -> Option<Instant> {
+        self.sync_last
+    }
+
+    pub fn sync_summary(&self) -> &str {
+        &self.sync_summary
+    }
+
+    /// Queue a sync shortly after a playlist mutation (debounced so rapid
+    /// edits become one cycle).
+    fn mark_sync_dirty(&mut self) {
+        if self.sync_paired() {
+            self.sync_dirty_at = Some(Instant::now());
+        }
+    }
+
+    pub fn trigger_sync_now(&mut self) {
+        if !self.sync_paired() {
+            self.set_status("Sync is off — press Y to pair this device.", false);
+            return;
+        }
+        if self.sync_busy {
+            return;
+        }
+        self.sync_busy = true;
+        self.sync_summary = "syncing…".into();
+        // Tests exercise the state machine only; a real worker would open
+        // the browser and hold the loopback port for its whole timeout.
+        #[cfg(not(test))]
+        let (tx, dir, device, token_path) = (
+            self.sync_tx.clone(),
+            self.playlists.dir().to_path_buf(),
+            self.playlists.device().to_string(),
+            self.token_path.clone(),
+        );
+        #[cfg(not(test))]
+        let result = thread::Builder::new().name("sync".into()).spawn(move || {
+            let report = match sync::dropbox::DropboxStore::at(&token_path) {
+                Ok(store) => sync::Engine::new(store, dir, device)
+                    .cycle()
+                    .map_err(|error| format!("{error:#}")),
+                Err(error) => Err(format!("{error:#}")),
+            };
+            let _ = tx.send(SyncMessage::Cycle(report));
+        });
+        #[cfg(not(test))]
+        if result.is_err() {
+            self.sync_busy = false;
+            self.set_status("Could not start the sync worker.", true);
+        }
+    }
+
+    /// Start a sync cycle when one is due: at startup, shortly after a
+    /// playlist change, or never when unpaired.
+    fn maybe_sync(&mut self) {
+        if !self.sync_paired() || self.sync_busy {
+            return;
+        }
+        if !self.sync_startup_done {
+            self.sync_startup_done = true;
+            self.trigger_sync_now();
+            return;
+        }
+        if let Some(dirty_at) = self.sync_dirty_at
+            && dirty_at.elapsed() >= Duration::from_secs(3)
+        {
+            self.sync_dirty_at = None;
+            self.trigger_sync_now();
+        }
+    }
+
+    fn poll_sync_messages(&mut self) {
+        while let Ok(message) = self.sync_rx.try_recv() {
+            match message {
+                SyncMessage::Paired(tokens) => self.apply_pairing(tokens),
+                SyncMessage::PairOutcome(message) => {
+                    // Only interesting while the wizard shows the wait.
+                    if matches!(self.sync_ui, SyncUi::Waiting { .. }) {
+                        self.sync_ui = SyncUi::Failed { message };
+                    }
+                }
+                SyncMessage::Cycle(Ok(report)) => {
+                    self.sync_busy = false;
+                    self.sync_last = Some(Instant::now());
+                    self.sync_summary = if report.is_empty() {
+                        "✓".into()
+                    } else {
+                        format!(
+                            "✓ ↑{} ↓{}{}",
+                            report.uploaded.len(),
+                            report.downloaded.len(),
+                            if report.conflicts.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" !{} conflicts", report.conflicts.len())
+                            }
+                        )
+                    };
+                    if !report.conflicts.is_empty() {
+                        self.set_status(
+                            format!("Sync kept both copies of: {}", report.conflicts.join(", ")),
+                            false,
+                        );
+                    }
+                }
+                SyncMessage::Cycle(Err(message)) => {
+                    self.sync_busy = false;
+                    self.sync_summary = "offline".to_string();
+                    let reauth = message.contains("not authorized");
+                    if reauth {
+                        sync::auth::clear_tokens_at(&self.token_path);
+                        self.sync_summary = "re-pair (Y)".into();
+                    }
+                    self.set_status(format!("Sync failed: {message}"), !reauth);
+                }
+            }
+        }
+    }
+
+    fn apply_pairing(&mut self, tokens: Tokens) {
+        if let Err(error) = sync::auth::save_tokens_at(&self.token_path, &tokens) {
+            self.sync_ui = SyncUi::Failed {
+                message: format!("could not store the pairing: {error:#}"),
+            };
+            return;
+        }
+        let mut config = config::Config::load_from(&self.config_path)
+            .unwrap_or_else(|_| config::Config::default());
+        config.device = self.playlists.device().to_string();
+        config.sync.enabled = true;
+        let _ = config.save_to(&self.config_path);
+        self.sync_ui = SyncUi::Paired {
+            summary: format!("Paired as \"{}\"", self.playlists.device()),
+        };
+        self.sync_startup_done = true;
+        self.trigger_sync_now();
+    }
+
+    /// Open the pairing wizard (`Y`).
+    fn open_sync_wizard(&mut self) {
+        if self.sync_paired() {
+            self.set_status(
+                "Already paired — Ctrl+Y syncs now. To re-pair, remove the app from your Dropbox connected apps first.",
+                false,
+            );
+            return;
+        }
+        let mut input = TextInput::default();
+        input.insert_str(self.playlists.device());
+        self.sync_ui = SyncUi::Intro { input };
+    }
+
+    fn start_pairing(&mut self, device_name: &str) {
+        let device_name = playlist::sanitize_name(device_name);
+        let device_name = if device_name.is_empty() {
+            "device".to_string()
+        } else {
+            device_name
+        };
+        self.playlists.set_device(device_name.clone());
+
+        let pending = sync::auth::begin();
+        let url = pending.authorize_url();
+        let verifier = pending.verifier().to_string();
+        self.sync_ui = SyncUi::Waiting {
+            url,
+            verifier,
+            manual: false,
+            input: TextInput::default(),
+        };
+
+        // Tests stop at the Waiting state; the real thread would open a
+        // browser and listen on the loopback port for up to 90 seconds.
+        #[cfg(not(test))]
+        {
+            let tx = self.sync_tx.clone();
+            let spawned = thread::Builder::new()
+                .name("sync-auth".into())
+                .spawn(move || {
+                    pending.open_browser();
+                    match pending.wait_for_callback() {
+                        sync::auth::AuthOutcome::Success(tokens) => {
+                            let _ = tx.send(SyncMessage::Paired(tokens));
+                        }
+                        sync::auth::AuthOutcome::Cancelled => {
+                            let _ = tx.send(SyncMessage::PairOutcome(
+                                "Pairing timed out or was cancelled.".into(),
+                            ));
+                        }
+                        sync::auth::AuthOutcome::Failed(message) => {
+                            let _ = tx.send(SyncMessage::PairOutcome(message));
+                        }
+                    }
+                });
+            if spawned.is_err() {
+                self.sync_ui = SyncUi::Failed {
+                    message: "could not start the pairing worker".into(),
+                };
+            }
+        }
+    }
+
+    fn handle_sync_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match &mut self.sync_ui {
+            SyncUi::None => {}
+            SyncUi::Intro { input } => match key.code {
+                KeyCode::Enter => {
+                    let name = input.value().to_string();
+                    self.start_pairing(&name);
+                }
+                KeyCode::Esc => self.sync_ui = SyncUi::None,
+                KeyCode::Backspace => input.backspace(),
+                KeyCode::Delete => input.delete(),
+                KeyCode::Char('u') if ctrl => input.clear(),
+                KeyCode::Char('w') if ctrl => input.delete_word(),
+                KeyCode::Char('a') if ctrl => input.home(),
+                KeyCode::Char('e') if ctrl => input.end(),
+                KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::ALT) => input.insert(ch),
+                _ => {}
+            },
+            SyncUi::Waiting {
+                url,
+                verifier,
+                manual,
+                input,
+            } => match key.code {
+                KeyCode::Esc => self.sync_ui = SyncUi::None,
+                KeyCode::Tab | KeyCode::Char('m') => {
+                    let url = url.clone();
+                    let verifier = verifier.clone();
+                    let manual = !*manual;
+                    self.sync_ui = SyncUi::Waiting {
+                        url,
+                        verifier,
+                        manual,
+                        input: TextInput::default(),
+                    };
+                }
+                KeyCode::Enter if *manual => {
+                    let code = input.value().trim().to_string();
+                    let verifier = verifier.clone();
+                    match sync::auth::exchange_code_for_tokens(&code, &verifier) {
+                        Ok(tokens) => self.apply_pairing(tokens),
+                        Err(error) => {
+                            self.sync_ui = SyncUi::Failed {
+                                message: format!("{error:#}"),
+                            };
+                        }
+                    }
+                }
+                KeyCode::Backspace if *manual => input.backspace(),
+                KeyCode::Delete if *manual => input.delete(),
+                KeyCode::Char(ch) if *manual && !key.modifiers.contains(KeyModifiers::ALT) => {
+                    input.insert(ch)
+                }
+                _ => {}
+            },
+            SyncUi::Paired { .. } | SyncUi::Failed { .. } => {
+                if matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q')) {
+                    self.sync_ui = SyncUi::None;
+                }
+            }
+        }
+    }
+
     pub fn handle_paste(&mut self, text: &str) {
         let text = text.replace(['\r', '\n'], " ");
         if let PlaylistUi::NamePrompt { input, .. } = &mut self.playlist_ui {
@@ -441,6 +779,12 @@ impl App {
         // Playlist popups swallow all keys except the global quit above.
         if !matches!(self.playlist_ui, PlaylistUi::None) {
             self.handle_playlist_key(key);
+            return;
+        }
+
+        // So does the sync pairing wizard.
+        if !matches!(self.sync_ui, SyncUi::None) {
+            self.handle_sync_key(key);
             return;
         }
 
@@ -519,6 +863,10 @@ impl App {
             KeyCode::Char('s') => self.open_add_to_playlist(),
             KeyCode::Char('o') => self.open_playlist_picker(),
             KeyCode::Char('v') => self.toggle_visualizer(),
+            KeyCode::Char('Y') => self.open_sync_wizard(),
+            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.trigger_sync_now()
+            }
             _ => {}
         }
     }
@@ -563,6 +911,10 @@ impl App {
             KeyCode::Char('s') => self.open_add_queue_item_to_playlist(),
             KeyCode::Char('o') => self.open_playlist_picker(),
             KeyCode::Char('v') => self.toggle_visualizer(),
+            KeyCode::Char('Y') => self.open_sync_wizard(),
+            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.trigger_sync_now()
+            }
             _ => {}
         }
     }
@@ -1392,6 +1744,7 @@ impl App {
             Ok(message) => {
                 self.playlist_ui = PlaylistUi::None;
                 self.set_status(message, false);
+                self.mark_sync_dirty();
             }
             Err(error) => self.set_status(format!("Could not save playlist: {error:#}"), true),
         }
@@ -1577,6 +1930,7 @@ impl App {
                     format!("Added \"{}\" to \"{name}\"", truncate_title(track)),
                     false,
                 );
+                self.mark_sync_dirty();
             }
             Ok(false) => self.set_status("Playlist not found.", true),
             Err(error) => self.set_status(format!("Could not update playlist: {error:#}"), true),
@@ -1588,6 +1942,7 @@ impl App {
             Ok(true) => {
                 self.set_status(format!("Deleted \"{name}\""), false);
                 self.refresh_picker();
+                self.mark_sync_dirty();
             }
             Ok(false) => self.set_status("Playlist not found.", true),
             Err(error) => self.set_status(format!("Could not delete playlist: {error:#}"), true),
@@ -1613,6 +1968,7 @@ impl App {
                     };
                 }
                 self.set_status(format!("Removed track from \"{name}\""), false);
+                self.mark_sync_dirty();
             }
             Ok(false) => self.set_status("Track not found.", true),
             Err(error) => self.set_status(format!("Could not update playlist: {error:#}"), true),
@@ -1665,6 +2021,87 @@ mod tests {
 
     fn test_app() -> App {
         App::with_player(Box::new(FakePlayer), true, false)
+    }
+
+    #[test]
+    fn y_opens_sync_wizard_and_esc_closes() {
+        let mut app = test_app();
+        app.focus = Focus::Results;
+        assert!(matches!(app.sync_ui, SyncUi::None));
+        app.handle_key(key(KeyCode::Char('Y')));
+        assert!(matches!(app.sync_ui, SyncUi::Intro { .. }));
+        // While open, keys go to the wizard, not the results list.
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(app.sync_ui, SyncUi::None));
+    }
+
+    #[test]
+    fn wizard_name_defaults_to_device_name() {
+        let mut app = test_app();
+        app.focus = Focus::Queue;
+        app.handle_key(key(KeyCode::Char('Y')));
+        let SyncUi::Intro { input } = &app.sync_ui else {
+            panic!("intro state");
+        };
+        assert_eq!(input.value(), app.playlists.device());
+    }
+
+    #[test]
+    fn wizard_enter_reaches_waiting_state() {
+        let mut app = test_app();
+        app.focus = Focus::Results;
+        app.handle_key(key(KeyCode::Char('Y')));
+        app.handle_key(key(KeyCode::Enter));
+        let SyncUi::Waiting { url, manual, .. } = &app.sync_ui else {
+            panic!("waiting state: {:?}", app.sync_ui);
+        };
+        assert!(url.starts_with("https://www.dropbox.com/oauth2/authorize"));
+        assert!(!*manual);
+        // The wizard swallows unrelated keys while waiting.
+        app.handle_key(key(KeyCode::Char('x')));
+        assert!(matches!(app.sync_ui, SyncUi::Waiting { .. }));
+        // Tab toggles the manual code entry.
+        app.handle_key(key(KeyCode::Tab));
+        assert!(matches!(&app.sync_ui, SyncUi::Waiting { manual: true, .. }));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(app.sync_ui, SyncUi::None));
+    }
+
+    #[test]
+    fn pairing_result_applies_tokens_and_starts_sync() {
+        let mut app = test_app();
+        let scratch = std::env::temp_dir().join(format!("tuimu-pairing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).expect("scratch");
+        app.config_path = scratch.join("config.toml");
+        app.token_path = scratch.join("tokens").join("dropbox.json");
+        assert!(!app.sync_paired());
+
+        let tokens = Tokens {
+            access: "at".into(),
+            refresh: "rt".into(),
+            expires_at: crate::model::now_epoch() + 1000,
+        };
+        app.apply_pairing(tokens);
+        assert!(app.sync_paired());
+        assert!(matches!(app.sync_ui, SyncUi::Paired { .. }));
+        assert!(app.sync_busy, "first cycle kicked off immediately");
+        let config = config::Config::load_from(&app.config_path).expect("config");
+        assert!(config.sync.enabled);
+        assert!(!config.device.is_empty());
+        // Drain the (doomed) sync worker message so it cannot leak into
+        // other tests, then clean the scratch dir.
+        app.poll_sync_messages();
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn unpaired_ctrl_y_reports_hint() {
+        let mut app = test_app();
+        app.focus = Focus::Results;
+        assert!(!app.sync_paired());
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert!(app.status.contains("Y"));
     }
 
     fn key(code: KeyCode) -> KeyEvent {

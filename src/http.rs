@@ -52,8 +52,7 @@ impl<'a> Request<'a> {
         }
     }
 
-    /// Request verb other than GET; used by the Dropbox sync backend.
-    #[allow(dead_code)]
+    /// Request verb other than GET.
     pub fn method(mut self, method: &'a str) -> Self {
         self.method = Some(method);
         self
@@ -71,8 +70,8 @@ impl<'a> Request<'a> {
         self
     }
 
-    /// Bearer auth header; used by the Dropbox sync backend.
-    #[allow(dead_code)]
+    /// Bearer auth header.
+    #[cfg_attr(test, allow(dead_code))]
     pub fn bearer(self, token: impl Into<String>) -> Self {
         self.header("Authorization", format!("Bearer {}", token.into()))
     }
@@ -84,8 +83,7 @@ impl<'a> Request<'a> {
         self
     }
 
-    /// Request body (stdin, binary-safe); used by the sync backend.
-    #[allow(dead_code)]
+    /// Request body (stdin, binary-safe).
     pub fn body(mut self, bytes: impl Into<Vec<u8>>) -> Self {
         self.body = Some(bytes.into());
         self

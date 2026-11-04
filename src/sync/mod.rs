@@ -15,11 +15,8 @@
 //! (`name (conflict-<device>)`), so no edit is ever lost. Deletions are
 //! propagated through tombstones on the store and win over edits.
 
-// The engine is exercised by tests now and wired into the app worker in a
-// follow-up commit; silence interim dead-code noise for the whole module.
-#![allow(dead_code)]
-
 pub mod auth;
+pub mod dropbox;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -135,6 +132,13 @@ pub struct CycleReport {
 }
 
 impl CycleReport {
+    pub fn is_empty(&self) -> bool {
+        self.uploaded.is_empty()
+            && self.downloaded.is_empty()
+            && self.deleted.is_empty()
+            && self.conflicts.is_empty()
+    }
+
     fn touched(&self) -> HashSet<String> {
         self.uploaded
             .iter()
