@@ -82,17 +82,13 @@ install_linux() {
     sudo install -m 0755 "$BINARY" /usr/local/bin/tuimu
 }
 
-# --- Termux: dependencies via pkg, build from source ---------------------------
+# --- Termux: dependencies via pkg, pre-built release or source build ------------
 
 install_termux() {
-    echo "Detected Termux (Android); installing dependencies and building from source."
+    echo "Detected Termux (Android)."
 
-    # Build toolchain.
-    command -v cargo >/dev/null || pkg install -y rust binutils
-    command -v git >/dev/null || pkg install -y git
+    # Runtime dependencies (needed for every install path).
     command -v curl >/dev/null || pkg install -y curl
-
-    # Runtime dependencies.
     command -v mpv >/dev/null || pkg install -y mpv
     # Only needed for the visualizer; missing pulseaudio falls back to
     # Android's native audio output, so this is best-effort.
@@ -103,6 +99,44 @@ install_termux() {
         # back to pip, which always installs the latest release.
         pkg install -y yt-dlp || { pkg install -y python-pip && pip install yt-dlp; }
     fi
+
+    # Prefer a pre-built release when one exists for this architecture.
+    ARCH=$(uname -m)
+    if [ "$ARCH" = "aarch64" ] && install_android_prebuilt "$ARCH"; then
+        return 0
+    fi
+    install_from_source
+}
+
+# Downloads and installs a pre-built Android binary. Returns non-zero when
+# no matching release exists (older releases, forks, network problems), in
+# which case the caller falls back to building from source.
+install_android_prebuilt() {
+    ARCH=$1
+    URL="https://github.com/masardon/tuimu/releases/latest/download/tuimu-android-$ARCH.tar.gz"
+
+    TEMP_DIR=$(mktemp -d)
+    echo "Downloading TuiMu for Android $ARCH..."
+    if ! curl -fL -o "$TEMP_DIR/tuimu.tar.gz" "$URL"; then
+        echo "No pre-built Android build available; building from source instead."
+        rm -rf "$TEMP_DIR"; TEMP_DIR=""
+        return 1
+    fi
+    tar -xzf "$TEMP_DIR/tuimu.tar.gz" -C "$TEMP_DIR" || return 1
+    BINARY=$(find "$TEMP_DIR" -type f -name tuimu -print -quit)
+    if [ -z "$BINARY" ]; then
+        echo "Error: Could not find tuimu binary in the archive"
+        return 1
+    fi
+
+    echo "Installing to \$PREFIX/bin..."
+    install -m 0755 "$BINARY" "$PREFIX/bin/tuimu"
+}
+
+install_from_source() {
+    # Build toolchain.
+    command -v cargo >/dev/null || pkg install -y rust binutils
+    command -v git >/dev/null || pkg install -y git
 
     # Prefer a checkout this script lives in (developer/CI use); otherwise
     # clone the repository.

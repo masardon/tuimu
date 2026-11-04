@@ -51,7 +51,7 @@ Or run in development: `cargo run`
 
 ### Using the Installation Script
 
-One-liner. On Linux it downloads the latest release build; on Termux (Android) it installs the dependencies via `pkg` and builds from source automatically:
+One-liner. On Linux it downloads the latest release build; on Termux (Android) it installs the dependencies via `pkg`, downloads a pre-built Android binary when one exists for your architecture (aarch64), and falls back to building from source automatically:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/masardon/tuimu/main/install.sh | bash
@@ -74,7 +74,7 @@ Or step by step:
 
 ### Building for Release
 
-Release binaries (`x86_64` and `aarch64`) are built automatically by GitHub
+Release binaries (`x86_64`, `aarch64`, and `aarch64` for Android/Termux) are built automatically by GitHub
 Actions whenever a version tag (`v*`) is pushed; `install.sh` always pulls the
 latest one. To cut a release manually:
 

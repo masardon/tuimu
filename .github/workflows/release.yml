@@ -59,9 +59,52 @@ jobs:
           path: tuimu-linux-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
 
+  # Termux (Android) build. All dependencies are pure Rust, so the NDK's
+  # clang as the cargo linker is the only toolchain needed; the resulting
+  # bionic binary runs directly in Termux on aarch64 devices.
+  build-android:
+    name: Build android (aarch64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-linux-android
+
+      - name: Install Android NDK
+        run: |
+          curl -fL -o ndk.zip https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          unzip -q ndk.zip -d "$HOME"
+          echo "NDK_TOOLCHAIN=$HOME/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release --target aarch64-linux-android
+        env:
+          # API 24 is Termux's minimum supported Android version.
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.NDK_TOOLCHAIN }}/bin/aarch64-linux-android24-clang
+
+      - name: Package
+        run: |
+          PACKAGE_DIR="tuimu-android-aarch64"
+          mkdir -p "$PACKAGE_DIR"
+          cp target/aarch64-linux-android/release/tuimu "$PACKAGE_DIR/"
+          cp README.md LICENSE clean-cache.sh install.sh "$PACKAGE_DIR/"
+          tar -czf "tuimu-android-aarch64.tar.gz" "$PACKAGE_DIR/"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tuimu-android-aarch64
+          path: tuimu-android-aarch64.tar.gz
+          if-no-files-found: error
+
   release:
     name: Publish release
-    needs: build
+    needs: [build, build-android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -71,5 +114,5 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/tuimu-linux-*.tar.gz
+          files: dist/tuimu-*.tar.gz
           generate_release_notes: true
