@@ -370,14 +370,7 @@ fn track_from_json(value: &Value, fallback: Option<SearchSource>) -> Option<Trac
     // The quality caching is handled at the App level
     let quality = Track::detect_quality(&title, source);
 
-    Some(Track {
-        title,
-        artist,
-        duration,
-        url,
-        source,
-        quality,
-    })
+    Some(Track::new(title, artist, duration, url, source, quality))
 }
 
 fn normalize_url(query: &str) -> Option<String> {

@@ -98,6 +98,107 @@ pub struct Track {
     pub url: String,
     pub source: Source,
     pub quality: Quality,
+    /// Stable identity for sync/merge: hash of the canonical source URL.
+    /// Older playlists without ids get them synthesized on load.
+    pub id: String,
+    /// Unix epoch seconds when the track was added (0 when unknown).
+    pub added_at: u64,
+}
+
+impl Track {
+    /// Build a track with a synthesized id and the current time.
+    pub fn new(
+        title: String,
+        artist: String,
+        duration: Option<f64>,
+        url: String,
+        source: Source,
+        quality: Quality,
+    ) -> Self {
+        Self {
+            title,
+            artist,
+            duration,
+            url: url.clone(),
+            source,
+            quality,
+            id: id_for_url(&url),
+            added_at: now_epoch(),
+        }
+    }
+}
+
+/// Current unix time in seconds (0 when the clock is before the epoch).
+pub fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Reduce a source URL to a stable form for identity hashing: trims,
+/// lowercases scheme and host, drops the fragment, and removes tracking
+/// query parameters (`utm_*`, YouTube `si`/`feature`, SoundCloud
+/// `in_xxx`). Two links to the same track then produce the same id.
+pub fn canonical_url(url: &str) -> String {
+    let trimmed = url.trim();
+    // Fragments sit after the query; strip them before anything else so
+    // `watch?v=abc#t=30` canonicalizes to `watch?v=abc`.
+    let trimmed = trimmed.split('#').next().unwrap_or(trimmed);
+    let (scheme_rest, rest) = match trimmed.split_once("://") {
+        Some(parts) => parts,
+        None => return trimmed.to_string(),
+    };
+    let scheme = scheme_rest.to_ascii_lowercase();
+    let (authority, path_query) = match rest.split_once('/') {
+        Some(parts) => parts,
+        None => (rest, ""),
+    };
+    // Drop credentials and port noise from the authority comparison and
+    // lowercase the host.
+    let host = authority
+        .rsplit('@')
+        .next()
+        .unwrap_or(authority)
+        .split(':')
+        .next()
+        .unwrap_or(authority)
+        .to_ascii_lowercase();
+    let (path, query) = match path_query.split_once('?') {
+        Some(parts) => parts,
+        None => (path_query, ""),
+    };
+    let kept: Vec<String> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .filter(|pair| {
+            let key = pair.split('=').next().unwrap_or("");
+            let key = key.to_ascii_lowercase();
+            !(key == "si"
+                || key == "feature"
+                || key == "t"
+                || key == "utm_source"
+                || key == "utm_medium"
+                || key == "utm_campaign"
+                || key == "utm_term"
+                || key == "utm_content"
+                || key.starts_with("in_"))
+        })
+        .map(str::to_string)
+        .collect();
+    let mut canonical = format!("{scheme}://{host}/{path}");
+    if !kept.is_empty() {
+        canonical.push('?');
+        canonical.push_str(&kept.join("&"));
+    }
+    canonical
+}
+
+/// Short hex sha256 of a canonical URL — stable across devices.
+pub fn id_for_url(url: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(canonical_url(url).as_bytes());
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

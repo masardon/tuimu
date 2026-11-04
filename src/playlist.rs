@@ -4,8 +4,11 @@
 //! Tracks are stored with their source page URL; audio is re-extracted with
 //! yt-dlp at play time, so saved playlists stay valid across sessions.
 
+use std::collections::HashMap;
+use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -16,6 +19,140 @@ const NAME_MAX_CHARS: usize = 60;
 
 pub struct Playlist {
     pub tracks: Vec<Track>,
+    /// Incremented on every save; the sync engine uses it for 3-way merges.
+    pub revision: u64,
+    /// Unix epoch seconds of the last save (0 for version 1 files).
+    /// Read by the sync engine for conflict ordering.
+    #[allow(dead_code)]
+    pub updated_at: u64,
+    /// Device name that wrote the file last.
+    pub device: String,
+}
+
+/// A human-friendly default device name, used until config exists.
+pub fn default_device_name() -> String {
+    if env::var_os("TERMUX_VERSION").is_some() {
+        return "phone".into();
+    }
+    env::var("USER")
+        .ok()
+        .filter(|user| !user.is_empty() && user != "root")
+        .unwrap_or_else(|| "desktop".into())
+}
+
+/// Single owner of every playlist mutation.
+///
+/// The app routes all playlist operations through this store so sync hooks
+/// (device name stamping, revision bumps, change detection) live in one
+/// place. It also detects edits made by other processes — a sync client
+/// such as Syncthing, or another tuimu on the same machine — by comparing
+/// file metadata between scans.
+pub struct PlaylistStore {
+    dir: PathBuf,
+    device: String,
+    /// Last-seen `(mtime, size)` per playlist file; `None` until primed.
+    baseline: Option<HashMap<String, (SystemTime, u64)>>,
+}
+
+impl PlaylistStore {
+    pub fn open(dir: PathBuf, device: String) -> Self {
+        Self {
+            dir,
+            device,
+            baseline: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Read by the sync engine when it pairs this device.
+    #[allow(dead_code)]
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+
+    pub fn save(&mut self, name: &str, tracks: &[Track]) -> Result<()> {
+        let result = save_with_device(&self.dir, name, tracks, &self.device);
+        self.refresh();
+        result
+    }
+
+    pub fn load(&self, name: &str) -> Result<Option<Playlist>> {
+        load(&self.dir, name)
+    }
+
+    pub fn list(&self) -> Vec<String> {
+        list(&self.dir)
+    }
+
+    pub fn rename(&mut self, old: &str, new: &str) -> Result<bool> {
+        let result = rename(&self.dir, old, new);
+        self.refresh();
+        result
+    }
+
+    pub fn delete(&mut self, name: &str) -> Result<bool> {
+        let result = delete(&self.dir, name);
+        self.refresh();
+        result
+    }
+
+    pub fn add_track(&mut self, name: &str, track: &Track) -> Result<bool> {
+        let result = add_track_with_device(&self.dir, name, track, &self.device);
+        self.refresh();
+        result
+    }
+
+    pub fn remove_track(&mut self, name: &str, index: usize) -> Result<bool> {
+        let result = remove_track_with_device(&self.dir, name, index, &self.device);
+        self.refresh();
+        result
+    }
+
+    fn refresh(&mut self) {
+        self.baseline = Some(scan_metadata(&self.dir));
+    }
+
+    /// True when playlist files changed since the last call without going
+    /// through this store (prime call returns `false`).
+    pub fn external_changes(&mut self) -> bool {
+        let scan = scan_metadata(&self.dir);
+        let changed = match &self.baseline {
+            Some(baseline) => &scan != baseline,
+            None => false,
+        };
+        self.baseline = Some(scan);
+        changed
+    }
+}
+
+fn scan_metadata(dir: &Path) -> HashMap<String, (SystemTime, u64)> {
+    let mut map = HashMap::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return map;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if let Ok(meta) = entry.metadata() {
+            map.insert(
+                name.to_string(),
+                (
+                    meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                    meta.len(),
+                ),
+            );
+        }
+    }
+    map
 }
 
 /// Resolve the playlists directory for the current user, creating it if
@@ -93,24 +230,54 @@ fn load_at(dir: &std::path::Path, sanitized: &str) -> Result<Option<Playlist>> {
         .map(|items| items.iter().filter_map(track_from_json).collect())
         .unwrap_or_default();
 
-    Ok(Some(Playlist { tracks }))
+    Ok(Some(Playlist {
+        tracks,
+        // Version 1 files carry no metadata; they upgrade on next save.
+        revision: json.get("revision").and_then(Value::as_u64).unwrap_or(0),
+        updated_at: json.get("updated_at").and_then(Value::as_u64).unwrap_or(0),
+        device: json
+            .get("device")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    }))
 }
 
-/// Persist a playlist atomically (temp file + rename).
+/// Persist a playlist atomically (temp file + rename), stamped with this
+/// device's name. Test-only convenience; the app uses [`PlaylistStore`].
+#[cfg(test)]
 pub fn save(dir: &std::path::Path, name: &str, tracks: &[Track]) -> Result<()> {
-    save_at(dir, &sanitize_name(name), tracks)
+    save_with_device(dir, name, tracks, &default_device_name())
 }
 
-fn save_at(dir: &std::path::Path, sanitized: &str, tracks: &[Track]) -> Result<()> {
+pub fn save_with_device(
+    dir: &std::path::Path,
+    name: &str,
+    tracks: &[Track],
+    device: &str,
+) -> Result<()> {
+    save_at(dir, &sanitize_name(name), tracks, device)
+}
+
+fn save_at(dir: &std::path::Path, sanitized: &str, tracks: &[Track], device: &str) -> Result<()> {
     if sanitized.is_empty() {
         bail!("playlist name is empty");
     }
     fs::create_dir_all(dir).context("could not create the playlists directory")?;
     let path = dir.join(format!("{sanitized}.json"));
 
+    // Bump the revision when the file already exists so concurrent
+    // devices can tell generations apart.
+    let revision = load_at(dir, sanitized)?
+        .map(|playlist| playlist.revision + 1)
+        .unwrap_or(1);
+
     let doc = json!({
         "name": sanitized,
-        "version": 1,
+        "version": 2,
+        "revision": revision,
+        "updated_at": crate::model::now_epoch(),
+        "device": device,
         "tracks": tracks.iter().map(track_to_json).collect::<Vec<_>>(),
     });
     let body = serde_json::to_string_pretty(&doc).context("could not encode the playlist")?;
@@ -148,26 +315,36 @@ pub fn rename(dir: &std::path::Path, old: &str, new: &str) -> Result<bool> {
     let Some(playlist) = load_at(dir, &old)? else {
         return Ok(false);
     };
-    save_at(dir, &new, &playlist.tracks)?;
+    save_at(dir, &new, &playlist.tracks, &playlist.device)?;
     delete_at(dir, &old)?;
     Ok(true)
 }
 
-/// Append a track to an existing playlist. Returns `false` when the playlist
-/// does not exist.
-pub fn add_track(dir: &std::path::Path, name: &str, track: &Track) -> Result<bool> {
+/// Append a track to an existing playlist. Returns `false` when the
+/// playlist does not exist.
+pub fn add_track_with_device(
+    dir: &std::path::Path,
+    name: &str,
+    track: &Track,
+    device: &str,
+) -> Result<bool> {
     let sanitized = sanitize_name(name);
     let Some(mut playlist) = load_at(dir, &sanitized)? else {
         return Ok(false);
     };
     playlist.tracks.push(track.clone());
-    save_at(dir, &sanitized, &playlist.tracks)?;
+    save_at(dir, &sanitized, &playlist.tracks, device)?;
     Ok(true)
 }
 
 /// Remove the track at `index` from a playlist. Returns `false` when the
 /// playlist or the index does not exist.
-pub fn remove_track(dir: &std::path::Path, name: &str, index: usize) -> Result<bool> {
+pub fn remove_track_with_device(
+    dir: &std::path::Path,
+    name: &str,
+    index: usize,
+    device: &str,
+) -> Result<bool> {
     let sanitized = sanitize_name(name);
     let Some(mut playlist) = load_at(dir, &sanitized)? else {
         return Ok(false);
@@ -176,7 +353,7 @@ pub fn remove_track(dir: &std::path::Path, name: &str, index: usize) -> Result<b
         return Ok(false);
     }
     playlist.tracks.remove(index);
-    save_at(dir, &sanitized, &playlist.tracks)?;
+    save_at(dir, &sanitized, &playlist.tracks, device)?;
     Ok(true)
 }
 
@@ -188,6 +365,8 @@ fn track_to_json(track: &Track) -> Value {
         "source": source_slug(track.source),
         "quality": quality_slug(track.quality),
         "duration": track.duration,
+        "id": track.id,
+        "added_at": track.added_at,
     })
 }
 
@@ -214,7 +393,7 @@ fn track_from_json(value: &Value) -> Option<Track> {
         title,
         artist,
         duration: value.get("duration").and_then(Value::as_f64),
-        url,
+        url: url.clone(),
         source: value
             .get("source")
             .and_then(Value::as_str)
@@ -225,6 +404,15 @@ fn track_from_json(value: &Value) -> Option<Track> {
             .and_then(Value::as_str)
             .and_then(quality_from_slug)
             .unwrap_or(Quality::Medium),
+        // v1 files have no id/added_at; synthesize them so merges can
+        // dedupe on load.
+        id: value
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(non_empty)
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::model::id_for_url(&url)),
+        added_at: value.get("added_at").and_then(Value::as_u64).unwrap_or(0),
     })
 }
 
@@ -286,14 +474,14 @@ mod tests {
     }
 
     fn track(url: &str) -> Track {
-        Track {
-            title: "Song".into(),
-            artist: "Artist".into(),
-            duration: Some(180.0),
-            url: url.into(),
-            source: Source::YouTube,
-            quality: Quality::High,
-        }
+        Track::new(
+            "Song".into(),
+            "Artist".into(),
+            Some(180.0),
+            url.into(),
+            Source::YouTube,
+            Quality::High,
+        )
     }
 
     #[test]
@@ -305,6 +493,109 @@ mod tests {
         assert_eq!(playlist.tracks[0].url, "https://a/1");
         assert_eq!(playlist.tracks[0].source, Source::YouTube);
         assert_eq!(playlist.tracks[0].quality, Quality::High);
+        assert_eq!(
+            playlist.tracks[0].id,
+            crate::model::id_for_url("https://a/1")
+        );
+        assert!(playlist.tracks[0].added_at > 0);
+    }
+
+    #[test]
+    fn version_two_metadata_roundtrips_and_revisions_bump() {
+        let dir = test_dir("v2-meta");
+        save_with_device(&dir, "mix", &[track("https://a/1")], "pixel").expect("save");
+        let first = load(&dir, "mix").expect("load").expect("present");
+        assert_eq!(first.revision, 1);
+        assert_eq!(first.device, "pixel");
+        assert!(first.updated_at > 0);
+
+        save_with_device(&dir, "mix", &[track("https://a/1")], "pc").expect("save");
+        let second = load(&dir, "mix").expect("load").expect("present");
+        assert_eq!(second.revision, 2);
+        assert_eq!(second.device, "pc");
+    }
+
+    #[test]
+    fn version_one_files_load_and_upgrade() {
+        let dir = test_dir("v1-upgrade");
+        let v1 = serde_json::json!({
+            "name": "legacy",
+            "version": 1,
+            "tracks": [{
+                "title": "Old",
+                "artist": "Hat",
+                "url": "https://a/legacy",
+                "source": "youtube",
+                "quality": "high",
+                "duration": 100.0,
+            }],
+        });
+        fs::write(dir.join("legacy.json"), v1.to_string()).expect("write");
+
+        let playlist = load(&dir, "legacy").expect("load").expect("present");
+        assert_eq!(playlist.revision, 0);
+        let legacy_id = crate::model::id_for_url("https://a/legacy");
+        assert_eq!(playlist.tracks[0].id, legacy_id);
+        assert_eq!(playlist.tracks[0].added_at, 0);
+
+        // Saving upgrades the file to version 2 with a fresh revision.
+        save_with_device(&dir, "legacy", &playlist.tracks, "pc").expect("save");
+        let upgraded = load(&dir, "legacy").expect("load").expect("present");
+        assert_eq!(upgraded.revision, 1);
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("legacy.json")).expect("read"))
+                .expect("json");
+        assert_eq!(doc["version"], 2);
+        assert_eq!(doc["tracks"][0]["id"], legacy_id);
+    }
+
+    #[test]
+    fn track_ids_are_stable_across_url_variants() {
+        let base = crate::model::id_for_url("https://www.youtube.com/watch?v=abc");
+        assert_eq!(
+            base,
+            crate::model::id_for_url("HTTPS://WWW.YOUTUBE.COM/watch?v=abc")
+        );
+        assert_eq!(
+            base,
+            crate::model::id_for_url("https://www.youtube.com/watch?v=abc&utm_source=share&si=xyz")
+        );
+        assert_eq!(
+            base,
+            crate::model::id_for_url("https://www.youtube.com/watch?v=abc#t=30")
+        );
+        assert_ne!(
+            base,
+            crate::model::id_for_url("https://www.youtube.com/watch?v=other")
+        );
+    }
+
+    #[test]
+    fn store_stamps_device_and_detects_external_changes() {
+        let dir = test_dir("store");
+        let mut store = PlaylistStore::open(dir.clone(), "pixel".into());
+
+        // Prime the baseline; own writes must not count as external.
+        assert!(!store.external_changes());
+        store.save("mix", &[track("https://a/1")]).expect("save");
+        store.add_track("mix", &track("https://a/2")).expect("add");
+        assert!(!store.external_changes());
+
+        let saved = store.load("mix").expect("load").expect("present");
+        assert_eq!(saved.device, "pixel");
+        assert_eq!(saved.revision, 2);
+
+        // A foreign write (another process, sync client) is detected.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(dir.join("mix.json"), "{\"version\":2,\"tracks\":[]}").expect("write");
+        assert!(store.external_changes());
+        assert!(!store.external_changes());
+
+        // Foreign file created and deleted.
+        fs::write(dir.join("foreign.json"), "{}").expect("write");
+        assert!(store.external_changes());
+        store.delete("foreign").expect("delete");
+        assert!(!store.external_changes());
     }
 
     #[test]
@@ -352,9 +643,7 @@ mod tests {
         let dir = test_dir("mutate");
         save(&dir, "mix", &[track("https://a/1")]).expect("save");
 
-        let mut playlist = load(&dir, "mix").expect("load").expect("present");
-        playlist.tracks.push(track("https://a/2"));
-        save(&dir, "mix", &playlist.tracks).expect("save");
+        assert!(add_track_with_device(&dir, "mix", &track("https://a/2"), "pc").expect("add"));
         assert_eq!(
             load(&dir, "mix")
                 .expect("load")
@@ -364,8 +653,7 @@ mod tests {
             2
         );
 
-        playlist.tracks.remove(0);
-        save(&dir, "mix", &playlist.tracks).expect("save");
+        assert!(remove_track_with_device(&dir, "mix", 0, "pc").expect("remove"));
         let playlist = load(&dir, "mix").expect("load").expect("present");
         assert_eq!(playlist.tracks[0].url, "https://a/2");
     }

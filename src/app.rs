@@ -11,7 +11,7 @@ use crate::input::TextInput;
 use crate::lyrics::{self, Lyrics};
 use crate::model::{QualityFilter, RepeatMode, SearchSource, Track};
 use crate::mpv::{Mpv, MpvMessage, Player};
-use crate::playlist::{self, Playlist};
+use crate::playlist::{self, Playlist, PlaylistStore};
 use crate::visualizer::{BANDS, Visualizer, VisualizerStatus, smooth};
 use crate::ytdlp::{self, Lookup, StreamInfo};
 
@@ -160,6 +160,9 @@ pub enum PickerLevel {
 
 /// How long an `Unavailable` visualizer waits before retrying capture.
 const VIZ_RETRY: Duration = Duration::from_secs(5);
+/// How often playlist files are scanned for changes made by other
+/// processes.
+const PLAYLIST_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 
 pub struct App {
     pub should_quit: bool,
@@ -182,7 +185,9 @@ pub struct App {
     pub lyrics: LyricsState,
     pub lyrics_enabled: bool,
     pub playlist_ui: PlaylistUi,
-    pub playlist_dir: PathBuf,
+    playlists: PlaylistStore,
+    /// When playlist files were last scanned for external changes.
+    playlist_scan_at: Instant,
     pub viz_enabled: bool,
     pub viz_visible: bool,
     viz: Visualizer,
@@ -242,7 +247,11 @@ impl App {
             },
             lyrics_enabled,
             playlist_ui: PlaylistUi::None,
-            playlist_dir: playlist::playlists_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            playlists: PlaylistStore::open(
+                playlist::playlists_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                playlist::default_device_name(),
+            ),
+            playlist_scan_at: Instant::now(),
             viz_enabled,
             viz_visible: viz_enabled,
             viz: Visualizer::default(),
@@ -274,6 +283,17 @@ impl App {
     }
 
     pub fn poll_background(&mut self) {
+        // Watch for playlist files changed by other processes (a sync client
+        // such as Syncthing, or another tuimu on the same machine) and fold
+        // them into the open picker.
+        if self.playlist_scan_at.elapsed() >= PLAYLIST_SCAN_INTERVAL {
+            self.playlist_scan_at = Instant::now();
+            if self.playlists.external_changes() {
+                self.refresh_playlist_picker();
+                self.set_status("Playlists changed on disk.", false);
+            }
+        }
+
         while let Ok(message) = self.search_rx.try_recv() {
             if message.seq == self.search_seq {
                 self.handle_search_result(message.result);
@@ -371,6 +391,18 @@ impl App {
                     let silent = vec![0.0; BANDS];
                     self.viz_bars = smooth(&self.viz_bars, &silent);
                 }
+            }
+        }
+    }
+
+    /// Reload picker caches after playlist files changed underneath us.
+    fn refresh_playlist_picker(&mut self) {
+        if let PlaylistUi::Picker { names, level, .. } = &mut self.playlist_ui {
+            *names = self.playlists.list();
+            if let PickerLevel::Tracks { playlist, tracks } = level
+                && let Some(loaded) = self.playlists.load(playlist).unwrap_or(None)
+            {
+                *tracks = loaded.tracks;
             }
         }
     }
@@ -1217,7 +1249,7 @@ impl App {
 
     /// `o`: browse saved playlists.
     pub fn open_playlist_picker(&mut self) {
-        let names = playlist::list(&self.playlist_dir);
+        let names = self.playlists.list();
         self.playlist_ui = PlaylistUi::Picker {
             mode: PickerMode::Open,
             level: PickerLevel::Playlists,
@@ -1245,7 +1277,7 @@ impl App {
     }
 
     fn open_add_to_playlist_with(&mut self, track: Track) {
-        let names = playlist::list(&self.playlist_dir);
+        let names = self.playlists.list();
         self.playlist_ui = PlaylistUi::Picker {
             mode: PickerMode::AddTo { track },
             level: PickerLevel::Playlists,
@@ -1342,17 +1374,17 @@ impl App {
         }
 
         let result = match action {
-            NameAction::SaveQueue => playlist::save(&self.playlist_dir, &name, &self.queue)
+            NameAction::SaveQueue => self
+                .playlists
+                .save(&name, &self.queue)
                 .map(|_| format!("Saved \"{name}\" ({} tracks)", self.queue.len())),
-            NameAction::Rename { old } => {
-                playlist::rename(&self.playlist_dir, old, &name).map(|renamed| {
-                    if renamed {
-                        format!("Renamed to \"{name}\"")
-                    } else {
-                        "Playlist not found.".to_string()
-                    }
-                })
-            }
+            NameAction::Rename { old } => self.playlists.rename(old, &name).map(|renamed| {
+                if renamed {
+                    format!("Renamed to \"{name}\"")
+                } else {
+                    "Playlist not found.".to_string()
+                }
+            }),
         };
 
         match result {
@@ -1470,7 +1502,7 @@ impl App {
             names, selected, ..
         } = &mut self.playlist_ui
         {
-            *names = playlist::list(&self.playlist_dir);
+            *names = self.playlists.list();
             *selected = if names.is_empty() {
                 0
             } else {
@@ -1491,7 +1523,7 @@ impl App {
     }
 
     fn open_playlist_tracks(&mut self, name: &str) {
-        let tracks = match playlist::load(&self.playlist_dir, name) {
+        let tracks = match self.playlists.load(name) {
             Ok(Some(Playlist { tracks, .. })) => tracks,
             _ => Vec::new(),
         };
@@ -1502,12 +1534,12 @@ impl App {
                 tracks,
             },
             selected: 0,
-            names: playlist::list(&self.playlist_dir),
+            names: self.playlists.list(),
         };
     }
 
     fn load_playlist(&mut self, name: &str, start: usize) {
-        match playlist::load(&self.playlist_dir, name) {
+        match self.playlists.load(name) {
             Ok(Some(Playlist { tracks, .. })) if !tracks.is_empty() => {
                 let start = start.min(tracks.len() - 1);
                 self.queue = tracks;
@@ -1523,7 +1555,7 @@ impl App {
     }
 
     fn append_playlist(&mut self, name: &str) {
-        match playlist::load(&self.playlist_dir, name) {
+        match self.playlists.load(name) {
             Ok(Some(Playlist { tracks, .. })) if !tracks.is_empty() => {
                 let added = tracks.len();
                 self.queue.extend(tracks);
@@ -1537,7 +1569,7 @@ impl App {
     }
 
     fn add_track_to_playlist(&mut self, name: &str, track: &Track) {
-        match playlist::add_track(&self.playlist_dir, name, track) {
+        match self.playlists.add_track(name, track) {
             Ok(true) => {
                 self.playlist_ui = PlaylistUi::None;
                 self.set_status(
@@ -1551,7 +1583,7 @@ impl App {
     }
 
     fn delete_playlist(&mut self, name: &str) {
-        match playlist::delete(&self.playlist_dir, name) {
+        match self.playlists.delete(name) {
             Ok(true) => {
                 self.set_status(format!("Deleted \"{name}\""), false);
                 self.refresh_picker();
@@ -1562,7 +1594,7 @@ impl App {
     }
 
     fn remove_track_from_playlist(&mut self, name: &str, index: usize) {
-        match playlist::remove_track(&self.playlist_dir, name, index) {
+        match self.playlists.remove_track(name, index) {
             Ok(true) => {
                 if let PlaylistUi::Picker {
                     level: PickerLevel::Tracks { tracks, .. },
@@ -1639,14 +1671,14 @@ mod tests {
     }
 
     fn track(quality: Quality) -> Track {
-        Track {
-            title: "Song".into(),
-            artist: "Artist".into(),
-            duration: Some(180.0),
-            url: "https://example.com/a".into(),
-            source: Source::YouTube,
+        Track::new(
+            "Song".into(),
+            "Artist".into(),
+            Some(180.0),
+            "https://example.com/a".into(),
+            Source::YouTube,
             quality,
-        }
+        )
     }
 
     #[test]
@@ -1774,7 +1806,7 @@ mod tests {
             std::env::temp_dir().join(format!("tuimu-app-playlists-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
-        app.playlist_dir = dir.clone();
+        app.playlists = PlaylistStore::open(dir.clone(), "test".into());
         (app, dir)
     }
 
@@ -2050,7 +2082,7 @@ mod tests {
     #[test]
     fn playlist_popups_render_without_panicking() {
         let (mut app, _dir) = test_app_with_playlist_dir("render");
-        playlist::save(&app.playlist_dir, "mix", &[track(Quality::High)]).expect("save");
+        playlist::save(app.playlists.dir(), "mix", &[track(Quality::High)]).expect("save");
         app.focus = Focus::Queue;
 
         let mut terminal =

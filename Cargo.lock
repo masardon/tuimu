@@ -1652,6 +1652,7 @@ dependencies = [
  "ratatui",
  "rustfft",
  "serde_json",
+ "sha2",
  "urlencoding",
 ]
 
