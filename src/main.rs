@@ -1,4 +1,6 @@
 mod app;
+mod config;
+mod http;
 mod input;
 mod lyrics;
 mod model;

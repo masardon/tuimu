@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 
+use crate::config;
 use crate::input::TextInput;
 use crate::lyrics::{self, Lyrics};
 use crate::model::{QualityFilter, RepeatMode, SearchSource, Track};
@@ -249,7 +250,7 @@ impl App {
             playlist_ui: PlaylistUi::None,
             playlists: PlaylistStore::open(
                 playlist::playlists_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                playlist::default_device_name(),
+                config::Config::load().device,
             ),
             playlist_scan_at: Instant::now(),
             viz_enabled,

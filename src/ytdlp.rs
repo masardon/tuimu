@@ -17,7 +17,7 @@ pub fn ytdlp_bin() -> String {
 }
 
 pub fn curl_bin() -> String {
-    env::var("TUIMU_CURL").unwrap_or_else(|_| "curl".into())
+    crate::http::curl_bin()
 }
 
 pub fn check_dependencies() -> Result<()> {
@@ -244,20 +244,10 @@ fn resolve_spotify(url: &str) -> Result<Lookup> {
         );
     }
 
-    let output = Command::new(curl_bin())
-        .args([
-            "-fsSL",
-            "--max-time",
-            "15",
-            "-G",
-            "--data-urlencode",
-            &format!("url={url}"),
-            "https://open.spotify.com/oembed",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+    let response = crate::http::Request::new("https://open.spotify.com/oembed")
+        .query("url", url)
+        .timeout(15)
+        .send()
         .with_context(|| {
             format!(
                 "Spotify matching needs `{}` (or set TUIMU_CURL). Install curl or paste a direct YouTube/SoundCloud URL.",
@@ -265,15 +255,12 @@ fn resolve_spotify(url: &str) -> Result<Lookup> {
             )
         })?;
 
-    if !output.status.success() {
-        bail!(
-            "Spotify metadata lookup failed: {}",
-            stderr_excerpt(&output.stderr)
-        );
+    if !response.is_success() {
+        bail!("Spotify metadata lookup failed: HTTP {}", response.status);
     }
 
     let value: Value =
-        serde_json::from_slice(&output.stdout).context("Spotify returned invalid metadata")?;
+        serde_json::from_slice(&response.body).context("Spotify returned invalid metadata")?;
     let title = value
         .get("title")
         .and_then(Value::as_str)

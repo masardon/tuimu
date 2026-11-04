@@ -1,10 +1,7 @@
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-
-use crate::ytdlp::curl_bin;
 
 const API_ROOT: &str = "https://lrclib.net/api";
 const USER_AGENT: &str = "TuiMu/0.1.0 (terminal music player)";
@@ -409,47 +406,21 @@ fn get_json_with_timeout(
         format!("{}?{}", url, query_string)
     };
 
-    let mut cmd = Command::new(curl_bin());
-    cmd.args([
-        "-sS",
-        "--max-time",
-        &timeout.to_string(),
-        "-A",
-        USER_AGENT,
-        "-w",
-        "\n%{http_code}",
-    ]);
-    cmd.arg(&full_url);
+    let response = crate::http::Request::new(&full_url)
+        .header("User-Agent", USER_AGENT)
+        .timeout(timeout)
+        .send()
+        .context("lyrics request failed")?;
 
-    let output = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("failed to start curl")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("lyrics request failed: {}", stderr.trim());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let (body, status) = stdout
-        .rsplit_once('\n')
-        .context("lyrics service returned an empty response")?;
-    let status = status
-        .trim()
-        .parse::<u16>()
-        .context("lyrics service returned an invalid HTTP status")?;
-
-    match status {
+    match response.status {
         200..=299 => {
-            let json: Value = serde_json::from_str(body)
-                .with_context(|| format!("invalid JSON response: {body}"))?;
+            let json: Value = serde_json::from_slice(&response.body)
+                .with_context(|| format!("invalid JSON response: {}", response.text()))?;
             Ok(Some(json))
         }
         400 | 404 => Ok(None),
-        429 | 500..=599 => bail!("lyrics service is unavailable (HTTP {status})"),
-        _ => bail!("lyrics service returned HTTP {status}"),
+        429 | 500..=599 => bail!("lyrics service is unavailable (HTTP {})", response.status),
+        _ => bail!("lyrics service returned HTTP {}", response.status),
     }
 }
 
