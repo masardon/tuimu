@@ -153,6 +153,33 @@ impl Mpv {
     }
 }
 
+/// The mpv audio output to force, if any.
+fn select_ao() -> Option<String> {
+    ao_choice(
+        env::var("TUIMU_AO").ok().filter(|ao| !ao.is_empty()),
+        crate::pulse::is_termux(),
+        crate::pulse::ensure_daemon,
+    )
+}
+
+/// Pure core of [`select_ao`] so the policy can be tested without a real
+/// Termux or daemon: an explicit override always wins, Termux gets pulse
+/// output only when a daemon can be provided, everyone else keeps mpv's
+/// default.
+fn ao_choice(
+    explicit: Option<String>,
+    termux: bool,
+    daemon_up: impl FnOnce() -> bool,
+) -> Option<String> {
+    if let Some(ao) = explicit {
+        return Some(ao);
+    }
+    if termux && daemon_up() {
+        return Some("pulse".into());
+    }
+    None
+}
+
 fn header_fields(headers: &[(String, String)]) -> Vec<String> {
     let mut fields: Vec<String> = headers
         .iter()
@@ -186,6 +213,17 @@ fn spawn_process(header_fields: &[String], seq: u64) -> Result<MpvProcess> {
         "--audio-display=no",
         "--volume=70",
     ]);
+    // Audio output selection. On Termux (Android) mpv defaults to the
+    // OpenSL ES / AAudio outputs, which talk to Android's AudioFlinger
+    // directly and bypass the PulseAudio server entirely — leaving the
+    // visualizer's `@DEFAULT_MONITOR@` capture silent. Routing playback
+    // through the Termux pulseaudio daemon (module-sles-sink) makes both
+    // audible playback and the sink monitor work. When the daemon cannot
+    // be started (no pulseaudio package installed), keep mpv's default
+    // output so playback still works without the visualizer.
+    if let Some(ao) = select_ao() {
+        command.arg(format!("--ao={ao}"));
+    }
     if !header_fields.is_empty() {
         command.arg(format!("--http-header-fields={}", header_fields.join(",")));
     }
@@ -277,6 +315,29 @@ fn spawn_process(header_fields: &[String], seq: u64) -> Result<MpvProcess> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_ao_override_wins_everywhere() {
+        assert_eq!(
+            ao_choice(Some("opensles".into()), true, || panic!("unused")),
+            Some("opensles".into())
+        );
+        assert_eq!(
+            ao_choice(Some("alsa".into()), false, || panic!("unused")),
+            Some("alsa".into())
+        );
+    }
+
+    #[test]
+    fn termux_gets_pulse_only_with_a_daemon() {
+        assert_eq!(ao_choice(None, true, || true), Some("pulse".into()));
+        assert_eq!(ao_choice(None, true, || false), None);
+    }
+
+    #[test]
+    fn desktop_keeps_mpv_default_without_asking_the_daemon() {
+        assert_eq!(ao_choice(None, false, || panic!("unused")), None);
+    }
 
     #[test]
     fn keeps_only_safe_header_fields() {

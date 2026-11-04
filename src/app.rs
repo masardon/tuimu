@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
@@ -157,6 +158,9 @@ pub enum PickerLevel {
     },
 }
 
+/// How long an `Unavailable` visualizer waits before retrying capture.
+const VIZ_RETRY: Duration = Duration::from_secs(5);
+
 pub struct App {
     pub should_quit: bool,
     pub focus: Focus,
@@ -183,6 +187,8 @@ pub struct App {
     pub viz_visible: bool,
     viz: Visualizer,
     viz_bars: Vec<f32>,
+    /// When an `Unavailable` visualizer may be retried next.
+    viz_retry_at: Instant,
     pub quality_filter: QualityFilter,
     prev_volume: f64,
     search_seq: u64,
@@ -241,6 +247,7 @@ impl App {
             viz_visible: viz_enabled,
             viz: Visualizer::default(),
             viz_bars: vec![0.0; BANDS],
+            viz_retry_at: Instant::now(),
             quality_filter: QualityFilter::All,
             prev_volume: 70.0,
             search_seq: 0,
@@ -338,11 +345,18 @@ impl App {
     }
 
     fn tick_visualizer(&mut self) {
-        // Capture runs only while the panel is shown; re-showing retries a
-        // previously failed start, so installing PulseAudio mid-session works.
+        // Capture runs only while the panel is shown. A failed start is
+        // retried every few seconds, so installing PulseAudio mid-session
+        // (or its daemon coming up later) heals on its own.
         if self.viz_enabled && self.viz_visible {
-            if self.viz.status() == VisualizerStatus::Stopped {
-                self.viz.start();
+            match self.viz.status() {
+                VisualizerStatus::Stopped => self.viz.start(),
+                VisualizerStatus::Unavailable if self.viz_retry_at.elapsed() >= VIZ_RETRY => {
+                    self.viz_retry_at = Instant::now();
+                    self.viz.stop();
+                    self.viz.start();
+                }
+                _ => {}
             }
         } else if self.viz.status() != VisualizerStatus::Stopped {
             self.viz.stop();

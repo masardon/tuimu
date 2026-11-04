@@ -116,6 +116,13 @@ impl Visualizer {
 }
 
 fn spawn_capture(tx: Sender<Vec<f32>>) -> Option<CaptureProcess> {
+    // On Termux, bring up the pulseaudio daemon (and with it the sink
+    // monitor) before connecting. The parec client library autospawns too,
+    // but an explicit start avoids races between first-time clients. A
+    // TUIMU_PAREC override means the user manages their own capture setup.
+    if crate::pulse::is_termux() && env::var_os("TUIMU_PAREC").is_none() {
+        crate::pulse::ensure_daemon();
+    }
     let bin = env::var("TUIMU_PAREC").unwrap_or_else(|_| "parec".into());
     let mut command = Command::new(bin);
     command.args([

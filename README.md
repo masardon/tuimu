@@ -200,6 +200,18 @@ Paste a single Spotify track URL - TuiMu pulls the title from Spotify's public o
 - `TUIMU_MPV` - override mpv executable (default: `mpv`)
 - `TUIMU_CURL` - override curl executable (default: `curl`)
 - `TUIMU_PAREC` - override parec executable (default: `parec`)
+- `TUIMU_PULSEAUDIO` - override pulseaudio executable (default: `pulseaudio`)
+- `TUIMU_AO` - force mpv's audio output (e.g. `pulse`, `opensles`). On Termux, `pulse` is selected automatically
+
+### Termux (Android)
+
+TuiMu runs on [Termux](https://termux.dev) with `pkg install rust mpv pulseaudio yt-dlp`, or with the one-line installer (see Install above). Under Termux the app starts the per-user pulseaudio daemon on demand (`module-sles-sink` outputs to the Android speakers) and routes playback through it with `--ao=pulse`, so the visualizer works out of the box. When the `pulseaudio` package is missing, TuiMu falls back to Android's native audio output — playback keeps working, the visualizer just shows a note.
+
+If the panel stays silent despite all this, start the daemon manually and retry (toggle `v` twice):
+
+```bash
+pulseaudio --start --load="module-sles-sink" --exit-idle-time=-1
+```
 
 ## Scripts
 

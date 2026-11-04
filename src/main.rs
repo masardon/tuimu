@@ -4,6 +4,7 @@ mod lyrics;
 mod model;
 mod mpv;
 mod playlist;
+mod pulse;
 mod ui;
 mod visualizer;
 mod ytdlp;
