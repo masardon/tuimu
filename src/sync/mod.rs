@@ -19,6 +19,8 @@
 // follow-up commit; silence interim dead-code noise for the whole module.
 #![allow(dead_code)]
 
+pub mod auth;
+
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;

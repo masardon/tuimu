@@ -155,10 +155,15 @@ fn scan_metadata(dir: &Path) -> HashMap<String, (SystemTime, u64)> {
     map
 }
 
+/// TuiMu's data directory (`playlists/`, `tokens/`, … live here).
+pub fn data_dir() -> PathBuf {
+    data_root().join("tuimu")
+}
+
 /// Resolve the playlists directory for the current user, creating it if
 /// missing.
 pub fn playlists_dir() -> Result<PathBuf> {
-    let dir = data_root().join("tuimu").join("playlists");
+    let dir = data_dir().join("playlists");
     fs::create_dir_all(&dir).context("could not create the playlists directory")?;
     Ok(dir)
 }
