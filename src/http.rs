@@ -135,6 +135,7 @@ impl<'a> Request<'a> {
             command.args(["-X", method]);
         }
         for (key, value) in &self.headers {
+            command.arg("-H");
             command.arg(format!("{key}: {value}"));
         }
         if let Some(body) = &self.body {

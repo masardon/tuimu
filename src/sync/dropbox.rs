@@ -142,7 +142,11 @@ fn map_error(context: &str, status: u16, body: &[u8]) -> StoreError {
             "{context}: not authorized (re-pair with Y)"
         )),
         (429, _) => StoreError::Other(anyhow::anyhow!("{context}: rate limited, retry later")),
-        _ => StoreError::Other(anyhow::anyhow!("{context}: HTTP {status}")),
+        _ => {
+            let excerpt = String::from_utf8_lossy(body);
+            let excerpt: String = excerpt.chars().take(160).collect();
+            StoreError::Other(anyhow::anyhow!("{context}: HTTP {status}: {excerpt:?}"))
+        }
     }
 }
 
@@ -287,6 +291,19 @@ fn is_not_found(body: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Live diagnostic against the real Dropbox API using this device's
+    /// pairing. Run explicitly with:
+    /// `cargo test --release live_dropbox_list -- --ignored --nocapture`
+    #[test]
+    #[ignore = "hits the real Dropbox API"]
+    fn live_dropbox_list() {
+        let mut store = DropboxStore::at(&crate::sync::auth::token_path()).expect("device paired");
+        match store.list() {
+            Ok(files) => println!("list OK: {} files", files.len()),
+            Err(error) => panic!("list failed: {error}"),
+        }
+    }
 
     #[test]
     fn paths_gain_leading_slash() {
