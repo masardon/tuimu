@@ -170,8 +170,16 @@ impl<'a> Request<'a> {
             .context("could not wait for curl")?;
         let body = std::fs::read(&body_path).unwrap_or_default();
         let headers = std::fs::read_to_string(&headers_path).unwrap_or_default();
-        let _ = std::fs::remove_file(&body_path);
-        let _ = std::fs::remove_file(&headers_path);
+        // TUIMU_HTTP_DEBUG keeps the raw artifacts of every request so
+        // transport mysteries can be diagnosed from the files themselves.
+        let debug = std::env::var_os("TUIMU_HTTP_DEBUG").is_some();
+        if !debug {
+            let _ = std::fs::remove_file(&body_path);
+            let _ = std::fs::remove_file(&headers_path);
+        } else {
+            let _ = std::fs::write(body_path.with_extension("stdout"), &output.stdout);
+            let _ = std::fs::write(body_path.with_extension("stderr"), &output.stderr);
+        }
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // Truncate very long stderr so error messages stay readable.
@@ -182,6 +190,20 @@ impl<'a> Request<'a> {
                 stderr.trim(),
                 excerpt(&headers)
             );
+        }
+
+        // Recovery for transports that misroute the body to stdout instead
+        // of the `-o` file (observed on one Android curl build): accept a
+        // complete JSON object found in the write-out stream.
+        let mut body = body;
+        if body.is_empty() {
+            let stdout_text = String::from_utf8_lossy(&output.stdout).into_owned();
+            if let (Some(start), Some(end)) = (stdout_text.find('{'), stdout_text.rfind('}'))
+                && end > start
+                && serde_json::from_str::<serde_json::Value>(&stdout_text[start..=end]).is_ok()
+            {
+                body = stdout_text.as_bytes()[start..=end].to_vec();
+            }
         }
 
         // Authoritative status: the last `HTTP/x.y NNN` line of the header
@@ -299,6 +321,28 @@ mod tests {
             .expect("send");
         assert_eq!(response.status, 404);
         assert_eq!(response.text(), "oops");
+        let _ = std::fs::remove_file(&script);
+    }
+
+    // Regression: a transport that misroutes the body to stdout (empty -o
+    // file, JSON in the write-out stream) still yields a usable response.
+    #[test]
+    fn body_recovered_from_stdout_when_file_is_empty() {
+        let script = std::env::temp_dir().join("tuimu-fake-curl-stdout");
+        std::fs::write(
+            &script,
+            "#!/usr/bin/env bash\nset -e\nout=\"\"; hdr=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  case \"$prev\" in\n    -o) out=\"$arg\" ;;\n    -D) hdr=\"$arg\" ;;\n  esac\n  prev=\"$arg\"\ndone\nprintf 'HTTP/1.1 200 OK\\r\\n' > \"$hdr\"\n: > \"$out\"\nprintf '\\n000\\n200{\"access_token\":\"recovered\"}'\n",
+        )
+        .expect("write script");
+        make_executable(&script);
+
+        let response = Request::new("https://example.com")
+            .curl_bin(script.to_str().unwrap())
+            .send()
+            .expect("send");
+        assert_eq!(response.status, 200);
+        let value: serde_json::Value = serde_json::from_str(&response.text()).expect("json");
+        assert_eq!(value["access_token"], "recovered");
         let _ = std::fs::remove_file(&script);
     }
 
