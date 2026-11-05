@@ -7,6 +7,7 @@
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 
@@ -108,14 +109,24 @@ impl<'a> Request<'a> {
     }
 
     pub fn send(self) -> Result<Response> {
+        // The body goes to a temp file and stdout carries only the `-w`
+        // write-out: some curl builds retry a transfer internally (e.g. when
+        // TLS 1.3 early data is rejected — OAuth endpoints always refuse it)
+        // and then emit the write-out TWICE, once as "000" for the aborted
+        // attempt. Writing the body through stdout would glue that garbage
+        // onto the payload; a file keeps them isolated, and the LAST status
+        // line is the authoritative one for the retry.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let body_path = std::env::temp_dir().join(format!(
+            "tuimu-http-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
         let mut command = Command::new(self.curl_bin.clone().unwrap_or_else(curl_bin));
-        command.args([
-            "-sS",
-            "--max-time",
-            &self.timeout_secs.to_string(),
-            "-w",
-            "\n%{http_code}",
-        ]);
+        command.args(["-sS", "--max-time", &self.timeout_secs.to_string(), "-o"]);
+        command.arg(&body_path);
+        command.arg("-w");
+        command.arg("\n%{http_code}");
         if let Some(method) = self.method {
             command.args(["-X", method]);
         }
@@ -154,25 +165,27 @@ impl<'a> Request<'a> {
         }
 
         let stdout = output.stdout;
-        let pos = stdout
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .context("curl returned an empty response")?;
-        let (body, status) = stdout.split_at(pos);
-        let status = &status[1..];
-        let status = std::str::from_utf8(status)
-            .ok()
-            .and_then(|status| status.trim().parse::<u16>().ok())
+        let body = std::fs::read(&body_path).unwrap_or_default();
+        let _ = std::fs::remove_file(&body_path);
+
+        // The write-out stream is "\n<code>" per transfer; the last line is
+        // the final transfer's status. "000" means curl never got a
+        // response at all.
+        let status_line = String::from_utf8_lossy(&stdout);
+        let lines: Vec<&str> = status_line
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        let status = lines
+            .last()
+            .and_then(|line| line.trim().parse::<u16>().ok())
             .with_context(|| {
                 format!(
-                    "curl returned no HTTP status (body starts with: {})",
-                    String::from_utf8_lossy(&stdout[..stdout.len().min(80)])
+                    "curl returned no HTTP status (write-out: {status_line:?}, body starts with: {})",
+                    String::from_utf8_lossy(&body[..body.len().min(80)])
                 )
             })?;
-        Ok(Response {
-            status,
-            body: body.to_vec(),
-        })
+        Ok(Response { status, body })
     }
 }
 
@@ -209,4 +222,36 @@ mod tests {
             .send();
         assert!(result.is_err());
     }
+
+    // Regression: some curl builds retry a transfer after rejected TLS
+    // early data and emit the `-w` write-out twice ("000" for the aborted
+    // attempt, then the real status). The body must stay untouched and the
+    // LAST status must win.
+    #[test]
+    fn doubled_writeout_keeps_body_and_takes_last_status() {
+        let script = std::env::temp_dir().join("tuimu-fake-curl-retry");
+        std::fs::write(
+            &script,
+            "#!/usr/bin/env bash\nset -e\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"-o\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '{\"access_token\":\"x\"}' > \"$out\"\nprintf '\\n000\\n200'\n",
+        )
+        .expect("write script");
+        make_executable(&script);
+
+        let response = Request::new("https://example.com")
+            .curl_bin(script.to_str().unwrap())
+            .send()
+            .expect("send");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.text(), "{\"access_token\":\"x\"}");
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &std::path::Path) {}
 }
