@@ -305,6 +305,22 @@ mod tests {
         }
     }
 
+    /// Live proof that refresh carries over the existing refresh token:
+    /// `cargo test --release live_refresh -- --ignored --nocapture`
+    #[test]
+    #[ignore = "hits the real Dropbox API"]
+    fn live_refresh() {
+        let tokens = crate::sync::auth::load_tokens_at(&crate::sync::auth::token_path())
+            .expect("device paired");
+        let refreshed =
+            crate::sync::auth::refresh_tokens(&tokens.refresh).expect("refresh succeeds");
+        assert_eq!(refreshed.refresh, tokens.refresh);
+        println!(
+            "refresh OK: access rotated, refresh token stable ({} chars)",
+            refreshed.refresh.len()
+        );
+    }
+
     #[test]
     fn paths_gain_leading_slash() {
         assert_eq!(dropbox_path(""), String::new());

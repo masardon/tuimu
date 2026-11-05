@@ -203,7 +203,8 @@ pub fn exchange_code_for_tokens(code: &str, verifier: &str) -> Result<Tokens> {
         ("client_id", &dropbox_client_id()),
         ("redirect_uri", REDIRECT_URI),
     ]);
-    request_tokens(&body)
+    // A fresh pairing must yield its own refresh token (offline access).
+    request_tokens(&body, None)
 }
 
 /// Refresh the access token with the stored refresh token.
@@ -213,10 +214,12 @@ pub fn refresh_tokens(refresh: &str) -> Result<Tokens> {
         ("refresh_token", refresh),
         ("client_id", &dropbox_client_id()),
     ]);
-    request_tokens(&body)
+    // Refresh responses carry no refresh_token; the existing one stays
+    // valid, so pass it through to the parser.
+    request_tokens(&body, Some(refresh))
 }
 
-fn request_tokens(body: &str) -> Result<Tokens> {
+fn request_tokens(body: &str, existing_refresh: Option<&str>) -> Result<Tokens> {
     let response = http::Request::new(TOKEN_ENDPOINT)
         .method("POST")
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -230,13 +233,21 @@ fn request_tokens(body: &str) -> Result<Tokens> {
             body_excerpt(&response.body)
         );
     }
-    let value: serde_json::Value = serde_json::from_slice(&response.body).with_context(|| {
+    parse_token_response(&response.body, existing_refresh).with_context(|| {
         format!(
             "unexpected token response (HTTP {}): {}",
             response.status,
             body_excerpt(&response.body)
         )
-    })?;
+    })
+}
+
+/// Pure parser for both token responses. The authorization-code exchange
+/// must carry a refresh token (`token_access_type=offline`); the refresh
+/// grant does NOT return one — Dropbox keeps the existing refresh token
+/// valid — so the caller's token is carried over instead.
+fn parse_token_response(body: &[u8], existing_refresh: Option<&str>) -> Result<Tokens> {
+    let value: serde_json::Value = serde_json::from_slice(body)?;
     let access = value
         .get("access_token")
         .and_then(|v| v.as_str())
@@ -245,8 +256,9 @@ fn request_tokens(body: &str) -> Result<Tokens> {
     let refresh = value
         .get("refresh_token")
         .and_then(|v| v.as_str())
-        .context("token response has no refresh_token")?
-        .to_string();
+        .map(str::to_string)
+        .or_else(|| existing_refresh.map(str::to_string))
+        .context("token response has no refresh_token")?;
     let expires_in = value
         .get("expires_in")
         .and_then(|v| v.as_u64())
@@ -340,6 +352,30 @@ pub fn current_access_token_at(path: &std::path::Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_exchange_response_must_carry_refresh_token() {
+        let body = br#"{"access_token":"at","expires_in":14400}"#;
+        assert!(parse_token_response(body, None).is_err());
+        let body = br#"{"access_token":"at","refresh_token":"rt","expires_in":14400}"#;
+        let tokens = parse_token_response(body, None).expect("parse");
+        assert_eq!(tokens.refresh, "rt");
+        assert_eq!(tokens.access, "at");
+    }
+
+    #[test]
+    fn refresh_response_carries_over_the_existing_refresh_token() {
+        // Dropbox refresh grants return only access_token + expires_in;
+        // the existing refresh token remains valid.
+        let body = br#"{"access_token":"at2","expires_in":14400}"#;
+        let tokens = parse_token_response(body, Some("rt-keep")).expect("parse");
+        assert_eq!(tokens.access, "at2");
+        assert_eq!(tokens.refresh, "rt-keep");
+        // If Dropbox ever rotates, the new one wins.
+        let body = br#"{"access_token":"at2","refresh_token":"rt-new"}"#;
+        let tokens = parse_token_response(body, Some("rt-keep")).expect("parse");
+        assert_eq!(tokens.refresh, "rt-new");
+    }
 
     #[test]
     fn authorize_url_contains_flow_parameters() {
