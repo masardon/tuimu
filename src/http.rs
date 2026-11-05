@@ -5,7 +5,6 @@
 //! already has. Bodies travel over stdin/stdout so binary payloads and long
 //! URLs are safe.
 
-use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -144,25 +143,22 @@ impl<'a> Request<'a> {
         for (key, value) in &self.headers {
             command.arg(format!("{key}: {value}"));
         }
-        if self.body.is_some() {
+        // Request body via file, not stdin: removes the stdin-pipe dimension
+        // that Android curl builds handle erratically.
+        let request_body_path = dir.join(format!("{id}.req"));
+        if let Some(body) = &self.body {
+            std::fs::write(&request_body_path, body).context("could not stage the request body")?;
             command.arg("--data-binary");
-            command.arg("@-");
+            command.arg(format!("@{}", request_body_path.display()));
         }
         command.arg(self.full_url());
-        command.stdin(Stdio::piped());
+        command.stdin(Stdio::null());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
 
         let mut child = command
             .spawn()
             .context("could not start curl (is it installed and in PATH?)")?;
-        if let Some(body) = &self.body {
-            let stdin = child.stdin.as_mut().expect("piped stdin");
-            stdin
-                .write_all(body)
-                .and_then(|_| stdin.flush())
-                .context("could not send request body through curl")?;
-        }
         drop(child.stdin.take());
 
         let output = child
@@ -180,6 +176,7 @@ impl<'a> Request<'a> {
             let _ = std::fs::write(body_path.with_extension("stdout"), &output.stdout);
             let _ = std::fs::write(body_path.with_extension("stderr"), &output.stderr);
         }
+        let _ = std::fs::remove_file(&request_body_path);
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // Truncate very long stderr so error messages stay readable.
