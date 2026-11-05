@@ -2500,6 +2500,56 @@ mod tests {
     }
 
     #[test]
+    fn queue_columns_fit_narrow_panels() {
+        let mut app = test_app();
+        // An hour-long track needs a 7-wide TIME cell, and the title must
+        // truncate to the column instead of pushing TIME/QUALITY out.
+        app.queue = vec![Track::new(
+            "The Incredible Sound Performance | Audiophile FLAC 24-Bit/192kHz".into(),
+            "NBR MUSIC PUBLISHING".into(),
+            Some(5261.0),
+            "https://example.com/long".into(),
+            Source::YouTube,
+            Quality::Lossless,
+        )];
+        app.current = Some(0);
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &app))
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let content: String = (0..buffer.area.area() as usize)
+            .map(|i| buffer.content[i].symbol().to_string())
+            .collect();
+        assert!(
+            content.contains("1:27:41"),
+            "full TIME label must survive, got: {content}"
+        );
+        assert!(
+            content.contains("(Loss)"),
+            "abbreviated quality must stay visible in a narrow panel, got: {content}"
+        );
+
+        // Wide terminal: the full quality label fits next to the same track.
+        let mut wide =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 24)).expect("terminal");
+        wide.draw(|frame| crate::ui::draw(frame, &app))
+            .expect("draw wide");
+        let buffer = wide.backend().buffer();
+        let content: String = (0..buffer.area.area() as usize)
+            .map(|i| buffer.content[i].symbol().to_string())
+            .collect();
+        assert!(content.contains("1:27:41"));
+        assert!(
+            content.contains("(Lossless)"),
+            "full quality must fit on a wide terminal, got: {content}"
+        );
+    }
+
+    #[test]
     fn visualizer_bars_render_without_panicking() {
         let mut app = App::with_player(Box::new(FakePlayer), true, true);
         app.viz_bars = (0..BANDS)

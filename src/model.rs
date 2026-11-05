@@ -258,10 +258,6 @@ impl Track {
             .unwrap_or_else(|| "--:--".into())
     }
 
-    pub fn quality_label(&self) -> &'static str {
-        self.quality.label()
-    }
-
     pub fn quality_score(&self) -> u8 {
         match self.quality {
             Quality::Low => 1,

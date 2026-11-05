@@ -95,6 +95,85 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// Width of the TIME column: wide enough for the longest visible duration
+/// (``5:32`` → 4, ``1:27:41`` → 7), clamped so one stray value cannot eat
+/// the table.
+fn time_column_width(tracks: &[Track]) -> u16 {
+    tracks
+        .iter()
+        .map(|track| track.duration_label().len())
+        .max()
+        .unwrap_or(5)
+        .clamp(5, 8) as u16
+}
+
+/// Column sizing for the track tables in narrow panels. Priorities, in
+/// order: keep TIME and the marker/index columns intact, keep a minimum
+/// TITLE width, shrink ARTIST, and finally abbreviate QUALITY labels —
+/// so panels degrade by truncating text, never by cutting TIME off the
+/// edge.
+struct ColumnPlan {
+    marker: u16,
+    index: u16,
+    title: u16,
+    artist: u16,
+    time: u16,
+    quality: u16,
+    abbreviated_quality: bool,
+}
+
+const GAPS: u16 = 5; // one column gap between the six columns
+const ARTIST_FLOOR: u16 = 6;
+const TITLE_FLOOR: u16 = 10;
+
+fn plan_columns(available: u16, time: u16, index: u16, artist_max: u16) -> ColumnPlan {
+    let fixed = 2 + index + time + GAPS;
+    let mut quality = 10u16;
+    let mut abbreviated = false;
+    let mut artist = artist_max;
+
+    let budget = |quality: u16, artist: u16| fixed + quality + artist + TITLE_FLOOR;
+    if available < budget(quality, artist) {
+        artist = available.saturating_sub(fixed + quality + TITLE_FLOOR);
+        if artist < ARTIST_FLOOR {
+            // Abbreviate quality labels: (Lo) (Med) (Hi) (Loss)
+            abbreviated = true;
+            quality = 6; // "(Loss)" is the longest abbreviation
+            artist = available.saturating_sub(fixed + quality + TITLE_FLOOR);
+            if artist < ARTIST_FLOOR {
+                artist = ARTIST_FLOOR;
+            }
+        }
+        artist = artist.min(artist_max);
+    }
+
+    let title = available
+        .saturating_sub(fixed + quality + artist)
+        .max(TITLE_FLOOR);
+
+    ColumnPlan {
+        marker: 2,
+        index,
+        title,
+        artist,
+        time,
+        quality,
+        abbreviated_quality: abbreviated,
+    }
+}
+
+fn quality_text(quality: Quality, abbreviated: bool) -> String {
+    if !abbreviated {
+        return format!("({})", quality.label());
+    }
+    match quality {
+        Quality::Low => "(Lo)".into(),
+        Quality::Medium => "(Med)".into(),
+        Quality::High => "(Hi)".into(),
+        Quality::Lossless => "(Loss)".into(),
+    }
+}
+
 fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Search || app.focus == Focus::Results;
     let block = Block::default()
@@ -146,18 +225,32 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    // Two leading columns are reserved by the highlight symbol.
+    let plan = plan_columns(
+        list_area.width.saturating_sub(2),
+        time_column_width(&app.results),
+        4,
+        20,
+    );
     let widths = [
-        Constraint::Length(2),
-        Constraint::Length(4),
-        Constraint::Min(10),
-        Constraint::Length(20),
-        Constraint::Length(7),
-        Constraint::Length(10),
+        Constraint::Length(plan.marker),
+        Constraint::Length(plan.index),
+        Constraint::Length(plan.title),
+        Constraint::Length(plan.artist),
+        Constraint::Length(plan.time),
+        Constraint::Length(plan.quality),
     ];
     let current_url = app.current_track().map(|track| track.url.as_str());
     let rows = app.results.iter().enumerate().map(|(index, track)| {
         let is_current = current_url == Some(track.url.as_str());
-        result_row(index, track, is_current)
+        result_row(
+            index,
+            track,
+            is_current,
+            plan.title as usize,
+            plan.artist as usize,
+            plan.abbreviated_quality,
+        )
     });
     let table = Table::new(rows, widths)
         .header(
@@ -209,11 +302,18 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
     }
 }
 
-fn result_row(index: usize, track: &Track, is_current: bool) -> Row<'static> {
+fn result_row(
+    index: usize,
+    track: &Track,
+    is_current: bool,
+    title_width: usize,
+    artist_width: usize,
+    abbreviated_quality: bool,
+) -> Row<'static> {
     let marker = if is_current { "▶" } else { "" };
-    let title = truncate(&track.title, 70);
-    let artist = truncate(&track.artist, 20);
-    let quality = format!("({})", track.quality_label());
+    let title = truncate(&track.title, title_width);
+    let artist = truncate(&track.artist, artist_width);
+    let quality = quality_text(track.quality, abbreviated_quality);
     let title_style = if is_current {
         Style::default().fg(GREEN).bold()
     } else {
@@ -272,20 +372,28 @@ fn draw_queue(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    // The highlight symbol ("▌ ") occupies two columns before the table
+    // columns themselves; budget for it.
+    let plan = plan_columns(
+        inner.width.saturating_sub(2),
+        time_column_width(&app.queue),
+        3,
+        14,
+    );
     let widths = [
-        Constraint::Length(2),
-        Constraint::Length(3),
-        Constraint::Min(10),
-        Constraint::Length(14),
-        Constraint::Length(6),
-        Constraint::Length(10),
+        Constraint::Length(plan.marker),
+        Constraint::Length(plan.index),
+        Constraint::Length(plan.title),
+        Constraint::Length(plan.artist),
+        Constraint::Length(plan.time),
+        Constraint::Length(plan.quality),
     ];
     let rows = app.queue.iter().enumerate().map(|(index, track)| {
         let is_current = app.current == Some(index);
         let marker = if is_current { "▶" } else { " " };
-        let title = truncate(&track.title, 70);
-        let artist = truncate(&track.artist, 14);
-        let quality = format!("({})", track.quality_label());
+        let title = truncate(&track.title, plan.title as usize);
+        let artist = truncate(&track.artist, plan.artist as usize);
+        let quality = quality_text(track.quality, plan.abbreviated_quality);
         let title_style = if is_current {
             Style::default().fg(GREEN).bold()
         } else {
