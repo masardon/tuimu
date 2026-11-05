@@ -109,24 +109,35 @@ impl<'a> Request<'a> {
     }
 
     pub fn send(self) -> Result<Response> {
-        // The body goes to a temp file and stdout carries only the `-w`
-        // write-out: some curl builds retry a transfer internally (e.g. when
-        // TLS 1.3 early data is rejected — OAuth endpoints always refuse it)
-        // and then emit the write-out TWICE, once as "000" for the aborted
-        // attempt. Writing the body through stdout would glue that garbage
-        // onto the payload; a file keeps them isolated, and the LAST status
-        // line is the authoritative one for the retry.
+        // This device's curl silently retries transfers over HTTP/3 when TLS
+        // early data is rejected (OAuth endpoints always refuse 0-RTT), and
+        // on that path both the `-w` write-out and the `-o` body file behave
+        // erratically (double write-out, empty body with a 200). Pin
+        // HTTP/1.1 to disable that code path, keep the body in a temp file
+        // away from stdout, and take the status from a `-D` header dump,
+        // whose last `HTTP/x.y NNN` line is always the real response.
         static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let body_path = std::env::temp_dir().join(format!(
+        let id = format!(
             "tuimu-http-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::SeqCst)
-        ));
+        );
+        let dir = std::env::temp_dir();
+        let body_path = dir.join(format!("{id}.body"));
+        let headers_path = dir.join(format!("{id}.headers"));
         let mut command = Command::new(self.curl_bin.clone().unwrap_or_else(curl_bin));
-        command.args(["-sS", "--max-time", &self.timeout_secs.to_string(), "-o"]);
+        command.args([
+            "-sS",
+            "--http1.1",
+            "--max-time",
+            &self.timeout_secs.to_string(),
+            "-o",
+        ]);
         command.arg(&body_path);
+        command.arg("-D");
+        command.arg(&headers_path);
         command.arg("-w");
-        command.arg("\n%{http_code}");
+        command.arg("%{http_code}");
         if let Some(method) = self.method {
             command.args(["-X", method]);
         }
@@ -157,35 +168,59 @@ impl<'a> Request<'a> {
         let output = child
             .wait_with_output()
             .context("could not wait for curl")?;
+        let body = std::fs::read(&body_path).unwrap_or_default();
+        let headers = std::fs::read_to_string(&headers_path).unwrap_or_default();
+        let _ = std::fs::remove_file(&body_path);
+        let _ = std::fs::remove_file(&headers_path);
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // Truncate very long stderr so error messages stay readable.
             let stderr = &stderr[..stderr.len().min(400)];
-            bail!("curl failed ({}): {}", output.status, stderr.trim());
+            bail!(
+                "curl failed ({}): {}\nheaders: {}",
+                output.status,
+                stderr.trim(),
+                excerpt(&headers)
+            );
         }
 
-        let stdout = output.stdout;
-        let body = std::fs::read(&body_path).unwrap_or_default();
-        let _ = std::fs::remove_file(&body_path);
-
-        // The write-out stream is "\n<code>" per transfer; the last line is
-        // the final transfer's status. "000" means curl never got a
-        // response at all.
-        let status_line = String::from_utf8_lossy(&stdout);
-        let lines: Vec<&str> = status_line
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .collect();
-        let status = lines
-            .last()
-            .and_then(|line| line.trim().parse::<u16>().ok())
-            .with_context(|| {
+        // Authoritative status: the last `HTTP/x.y NNN` line of the header
+        // dump. Fallback: the last all-digits line of the `-w` write-out.
+        let mut status: Option<u16> = None;
+        for line in headers.lines().filter(|line| line.starts_with("HTTP/")) {
+            if let Some(code) = line.split_whitespace().nth(1).and_then(|c| c.parse().ok()) {
+                status = Some(code);
+            }
+        }
+        if status.is_none() {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let line = line.trim();
+                if !line.is_empty()
+                    && line.chars().all(|c| c.is_ascii_digit())
+                    && let Ok(code) = line.parse::<u16>()
+                {
+                    status = Some(code);
+                }
+            }
+        }
+        let status = status.with_context(|| {
                 format!(
-                    "curl returned no HTTP status (write-out: {status_line:?}, body starts with: {})",
+                    "curl returned no HTTP status (write-out: {:?}, headers: {:?}, body starts with: {})",
+                    String::from_utf8_lossy(&output.stdout),
+                    excerpt(&headers),
                     String::from_utf8_lossy(&body[..body.len().min(80)])
                 )
             })?;
         Ok(Response { status, body })
+    }
+}
+
+fn excerpt(text: &str) -> String {
+    let trimmed: String = text.chars().take(160).collect();
+    if trimmed.is_empty() {
+        "<empty>".into()
+    } else {
+        format!("{trimmed:?}")
     }
 }
 
@@ -225,14 +260,14 @@ mod tests {
 
     // Regression: some curl builds retry a transfer after rejected TLS
     // early data and emit the `-w` write-out twice ("000" for the aborted
-    // attempt, then the real status). The body must stay untouched and the
-    // LAST status must win.
+    // attempt, then the real status). The body must stay untouched, and the
+    // status must come from the header dump regardless of stdout noise.
     #[test]
     fn doubled_writeout_keeps_body_and_takes_last_status() {
         let script = std::env::temp_dir().join("tuimu-fake-curl-retry");
         std::fs::write(
             &script,
-            "#!/usr/bin/env bash\nset -e\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"-o\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '{\"access_token\":\"x\"}' > \"$out\"\nprintf '\\n000\\n200'\n",
+            "#!/usr/bin/env bash\nset -e\nout=\"\"; hdr=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  case \"$prev\" in\n    -o) out=\"$arg\" ;;\n    -D) hdr=\"$arg\" ;;\n  esac\n  prev=\"$arg\"\ndone\nprintf '{\"access_token\":\"x\"}' > \"$out\"\nprintf 'HTTP/1.1 200 OK\\r\\nContent-Length: 22\\r\\n' > \"$hdr\"\nprintf '\\n000\\n200'\n",
         )
         .expect("write script");
         make_executable(&script);
@@ -243,6 +278,27 @@ mod tests {
             .expect("send");
         assert_eq!(response.status, 200);
         assert_eq!(response.text(), "{\"access_token\":\"x\"}");
+        let _ = std::fs::remove_file(&script);
+    }
+
+    // When no header dump exists (transfer-level failure fallback), the
+    // write-out's last status line is used.
+    #[test]
+    fn missing_header_dump_falls_back_to_writeout() {
+        let script = std::env::temp_dir().join("tuimu-fake-curl-nohdr");
+        std::fs::write(
+            &script,
+            "#!/usr/bin/env bash\nset -e\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"-o\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf 'oops' > \"$out\"\nprintf '\\n404'\n",
+        )
+        .expect("write script");
+        make_executable(&script);
+
+        let response = Request::new("https://example.com")
+            .curl_bin(script.to_str().unwrap())
+            .send()
+            .expect("send");
+        assert_eq!(response.status, 404);
+        assert_eq!(response.text(), "oops");
         let _ = std::fs::remove_file(&script);
     }
 
