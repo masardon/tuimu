@@ -2020,7 +2020,15 @@ mod tests {
     }
 
     fn test_app() -> App {
-        App::with_player(Box::new(FakePlayer), true, false)
+        let mut app = App::with_player(Box::new(FakePlayer), true, false);
+        // Tests must not depend on (or touch) this machine's real pairing
+        // and configuration.
+        let scratch = std::env::temp_dir().join(format!("tuimu-app-paths-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).expect("scratch");
+        app.config_path = scratch.join("config.toml");
+        app.token_path = scratch.join("tokens").join("dropbox.json");
+        app
     }
 
     #[test]
