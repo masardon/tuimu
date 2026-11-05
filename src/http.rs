@@ -163,7 +163,12 @@ impl<'a> Request<'a> {
         let status = std::str::from_utf8(status)
             .ok()
             .and_then(|status| status.trim().parse::<u16>().ok())
-            .context("curl returned an invalid HTTP status")?;
+            .with_context(|| {
+                format!(
+                    "curl returned no HTTP status (body starts with: {})",
+                    String::from_utf8_lossy(&stdout[..stdout.len().min(80)])
+                )
+            })?;
         Ok(Response {
             status,
             body: body.to_vec(),

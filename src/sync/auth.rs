@@ -225,12 +225,18 @@ fn request_tokens(body: &str) -> Result<Tokens> {
         .context("could not reach the Dropbox token endpoint")?;
     if !response.is_success() {
         bail!(
-            "Dropbox rejected the token request (HTTP {})",
-            response.status
+            "Dropbox rejected the token request (HTTP {}): {}",
+            response.status,
+            body_excerpt(&response.body)
         );
     }
-    let value: serde_json::Value =
-        serde_json::from_slice(&response.body).context("invalid token response")?;
+    let value: serde_json::Value = serde_json::from_slice(&response.body).with_context(|| {
+        format!(
+            "unexpected token response (HTTP {}): {}",
+            response.status,
+            body_excerpt(&response.body)
+        )
+    })?;
     let access = value
         .get("access_token")
         .and_then(|v| v.as_str())
@@ -250,6 +256,16 @@ fn request_tokens(body: &str) -> Result<Tokens> {
         refresh,
         expires_at: crate::model::now_epoch() + expires_in,
     })
+}
+
+fn body_excerpt(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let text: String = text.chars().take(160).collect();
+    if text.is_empty() {
+        "<empty body>".into()
+    } else {
+        format!("{text:?}")
+    }
 }
 
 pub fn form_urlencoded(pairs: &[(&str, &str)]) -> String {
